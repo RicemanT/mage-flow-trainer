@@ -14,6 +14,9 @@ A fork of [bluvoll/mage-flow-trainer](https://github.com/bluvoll/mage-flow-train
 - **Save now / Save & stop** from the GUI, or by touching `save` / `save_quit` in the run folder.
 - **Per-artist datasets:** `dataset.subsets_file` reads Illustration Scrapping Studio's export. The cache can be stored as float16 (`dataset.latent_dtype`, `cache_latents convert`), and `cache-config` caches every folder in one process.
 
+- **Remote training:** run the GUI on a laptop and train on a GPU box (Colab, JupyterHub, a rented pod). Paste the link the box prints, then Connect. See [docs/remote-training.md](docs/remote-training.md).
+- **Faster startup at scale:** rank 0 scans the dataset once and shares it with the other ranks, and thousands of subset folders are scanned in parallel.
+
 Trackers are optional: `pip install -r requirements-tracking.txt`.
 
 ## Why use this trainer?

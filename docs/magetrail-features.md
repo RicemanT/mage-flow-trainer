@@ -16,6 +16,8 @@ like upstream.
 | [Save now / save and stop](#save-now-and-save-and-stop) | files in the run folder | Save now, Save & stop |
 | [Subset manifest](#thousands-of-folders-subsets_file) | `dataset.subsets_file`, `subsets_root` | Dataset Source |
 | [Half-precision latent cache](#latent-cache-size-and-speed) | `dataset.latent_dtype`, `cache_latents convert` | Dataset Source |
+| [Remote training](remote-training.md) | `python -m trainer.remote serve` on the GPU box | Remote bar |
+| [Startup at scale](#startup-at-scale) | automatic | -- |
 
 Training from cached latents with the images deleted was already in upstream: set
 `dataset.source = "latents"` (or leave `"auto"`) and keep each latent's `.txt`/`_nl.txt`. Run
@@ -231,6 +233,11 @@ subsets_root = "/workspace/library/images"   # optional: re-root paths written o
   across GPUs together. The GUI's Cache button and the cache step before Start Training use it too.
 - A folder whose images were deleted after caching counts as "nothing to do", not an error.
 - Fixed: the planned cache size printed by `cache` was half the real float32 size.
+
+## Startup at scale
+
+- **Rank 0 scans, the others receive.** Every rank used to scan the whole dataset: an 8-GPU job read about 600k image (or cache) headers, captions and cache files eight times over the same volume. Now rank 0 scans and broadcasts the result. If the scan fails, the error is raised on every rank instead of leaving the others waiting until the one-hour process-group timeout.
+- **Folders are scanned in parallel.** From 8 subsets up, rank 0 scans on up to 16 threads, and results are merged in folder order, so entries and batches are identical to a sequential scan. Measured on 300 folders x 6 images: 7.2 s vs 27.9 s with a cold file cache, 2.1 s vs 2.9 s warm. `MAGEFLOW_SCAN_WORKERS` overrides the thread count, and 1 turns threading off.
 
 ## Not ported, and why
 

@@ -24,6 +24,8 @@ from PySide6 import QtCore, QtWidgets
 from . import bridge
 from ..training.optimizer_specs import OPTIMIZERS, optimizer_defaults, supports
 from .metrics import LiveMetricsWidget
+from .remote_runner import RemoteCall, RemoteRunner
+from ..remote.client import RemoteClient, RemoteError
 from .process import (Job, ProcessRunner, audit_launch, cache_config_launch, concat_launch,
                       train_launch, training_env)
 from .schema import LAYOUT, SPEC
@@ -210,6 +212,10 @@ class TrainingGUI(QtWidgets.QWidget):
         # Configs opened from outside `configs/`, kept for the session so the preset
         # dropdown can list them alongside the built-ins.
         self._external: list[Path] = []
+        # Remote training (`trainer.remote` on a GPU box): None = everything runs locally.
+        self.remote: RemoteClient | None = None
+        self.remote_status: dict | None = None
+        self._remote_calls: list[RemoteCall] = []
 
         self._setup_ui()
         self._on_gpu_selection()
@@ -347,6 +353,8 @@ class TrainingGUI(QtWidgets.QWidget):
         self.advice.setVisible(False)
         lay.addWidget(self.advice)
 
+        lay.addLayout(self._build_remote_row())
+
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(8)
         # Checkboxes, not a text field. This used to be a QLineEdit whose placeholder read "all",
@@ -385,6 +393,17 @@ class TrainingGUI(QtWidgets.QWidget):
             "PCIe 3.0 x8: a full finetune all-reduces ~3.5GB per optimizer step. Raise gradient "
             "accumulation before adding GPUs.")
         row.addWidget(self.proc_label)
+        # Shown instead of the local checkboxes while connected to a remote server.
+        self.remote_gpu_label = make_label("Remote GPUs", color=THEME.text_muted)
+        self.remote_gpu_edit = QtWidgets.QLineEdit()
+        self.remote_gpu_edit.setFixedWidth(110)
+        self.remote_gpu_edit.setToolTip(
+            "Device list on the remote machine, e.g. 0,1. Blank uses every GPU it has, one "
+            "process each.")
+        self.remote_gpu_edit.textChanged.connect(lambda _: self._on_gpu_selection())
+        for w in (self.remote_gpu_label, self.remote_gpu_edit):
+            w.setVisible(False)
+            row.addWidget(w)
 
         row.addSpacing(16)
         self.audit_btn = make_btn("Audit dataset", self._audit)
@@ -452,6 +471,8 @@ class TrainingGUI(QtWidgets.QWidget):
         return ",".join(str(i) for i in chosen)
 
     def num_processes(self) -> int:
+        if self.remote is not None:
+            return self._remote_process_count()
         return max(1, len(self.selected_gpus()))
 
     def _on_gpu_selection(self):
@@ -475,6 +496,10 @@ class TrainingGUI(QtWidgets.QWidget):
                                else index == self.selected_gpus()[0])
                 box.blockSignals(False)
 
+        if self.remote is not None:
+            n = self.num_processes()
+            self.remote_gpu_label.setText(f"Remote GPUs  ({n} process{'es' if n > 1 else ''})")
+            return
         n = self.num_processes()
         self.proc_label.setText(
             f"→ {n} process{'es' if n > 1 else ''}"
@@ -742,23 +767,29 @@ class TrainingGUI(QtWidgets.QWidget):
 
     _last_was_progress = False
 
-    def _run(self, launch, training=True, on_failure="stop"):
+    def _run(self, launch, training=True, on_failure="stop", runner=None):
+        """Run `launch` locally, or -- with `runner` -- follow a remote job the same way."""
         if self.runner is not None and self.runner.isRunning():
             self.log("A process is already running.")
             return
         self._on_failure = on_failure
-        try:
-            env = training_env(self.gpu_arg())
-        except ValueError as exc:            # unreachable from the checkboxes; a guard, not a path
-            self.log(f"CONFIG ERROR: {exc}")
-            return
-        self.runner = ProcessRunner(launch, str(PROJECT_ROOT), env)
+        if runner is None:
+            try:
+                env = training_env(self.gpu_arg())
+            except ValueError as exc:        # unreachable from the checkboxes; a guard, not a path
+                self.log(f"CONFIG ERROR: {exc}")
+                return
+            self.runner = ProcessRunner(launch, str(PROJECT_ROOT), env)
+            header = f"{launch.label}\n" + " ".join(launch.argv)
+        else:
+            self.runner = runner
+            header = f"{runner.label}\non {runner.client.base}"
         self.runner.logSignal.connect(self.log)
         self.runner.errorSignal.connect(self.log)
         self.runner.progressSignal.connect(self._handle_output)
         self.runner.metricsSignal.connect(self.metrics.parse_and_update)
         self.runner.finishedSignal.connect(self._finished)
-        self.log("\n" + "=" * 60 + f"\n{launch.label}\n" + " ".join(launch.argv) + "\n" + "=" * 60)
+        self.log("\n" + "=" * 60 + f"\n{header}\n" + "=" * 60)
         self.tab_bar.setCurrentIndex(self.tab_bar.count() - (2 if training else 1))
         if training:
             self.metrics.clear_data()
@@ -820,6 +851,9 @@ class TrainingGUI(QtWidgets.QWidget):
         self._load_presets(select=path)
         self._run_dir = (Path(flat.get("train.output_dir") or "output")
                          / (flat.get("train.run_name") or "mageflow"))
+        if self.remote is not None:
+            self._remote_start(path, ["cache", "train"], training=True)
+            return
 
         # Cache first here too. Same reasoning as the pipeline: an uncached folder is silent, and
         # a warm cache makes this a no-op. A cache step that fails cancels the training, because
@@ -878,6 +912,9 @@ class TrainingGUI(QtWidgets.QWidget):
     def _signal(self, name: str) -> None:
         """Drop a `save` / `save_quit` file into the running job's folder. The trainer checks for
         it after every optimizer step and removes it once handled."""
+        if isinstance(self.runner, RemoteRunner):
+            self._remote_signal(name)
+            return
         run_dir = getattr(self, "_run_dir", None)
         if run_dir is None:
             self.log("No run folder known for this job -- touch <output_dir>/<run_name>/"
@@ -1011,6 +1048,11 @@ class TrainingGUI(QtWidgets.QWidget):
 
     def _cache(self, dry=False):
         c = self.collect()
+        if self.remote is not None:
+            path = self._cache_config_path(c)
+            if path is not None:
+                self._remote_start(path, ["cache_dry" if dry else "cache"], training=False)
+            return
         if not self._dataset_paths(c) and not c.get("dataset.subsets_file"):
             self.log("Nothing to cache -- set a Dataset path, subset rows or a subsets file.")
             return
@@ -1022,6 +1064,11 @@ class TrainingGUI(QtWidgets.QWidget):
                   training=False, on_failure="continue")
 
     def _audit(self):
+        if self.remote is not None:
+            self.log("Audit reads the dataset folders, which are on the remote machine: run "
+                     "`python -m trainer.tools.cache_latents audit <folder>` there, or use Cache "
+                     "(dry run), which plans the same buckets remotely.")
+            return
         c = self.collect()
         paths = self._dataset_paths(c)
         if not paths:
@@ -1030,7 +1077,181 @@ class TrainingGUI(QtWidgets.QWidget):
         steps = c.get("dataset.bucket_reso_steps") or 64
         self._run_each([audit_launch(p, steps) for p in paths], "Auditing")
 
+    # ---------------------------------------------------------------- remote
+
+    _REMOTE_SETTINGS = PROJECT_ROOT / ".gui_remote.json"
+
+    def _build_remote_row(self) -> QtWidgets.QHBoxLayout:
+        row = QtWidgets.QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(make_label("Remote", color=THEME.text_muted))
+        self.remote_edit = QtWidgets.QLineEdit()
+        self.remote_edit.setPlaceholderText(
+            "empty = train on this computer; or paste the connect link from "
+            "`python -m trainer.remote serve` on a GPU box (https://...#token=...)")
+        self.remote_edit.setToolTip(
+            "On the GPU machine (Colab, JupyterHub, a rented pod), run in a notebook cell:\n"
+            "    from trainer.remote import serve; serve()\n"
+            "or, to train from the notebook itself:\n"
+            "    from trainer.remote import receive_config, run\n"
+            "    config = receive_config()   # then, next cell: run(config)\n\n"
+            "It prints a link with an access token after #. Paste it here and Connect: Start "
+            "Training and Cache then run there (or, in receive mode, Start sends the config).")
+        self.remote_edit.setText(self._load_remote_link())
+        self.remote_btn = make_btn("Connect", self._toggle_remote)
+        self.remote_btn.setFixedWidth(100)
+        self.remote_label = make_label("local", color=THEME.text_muted)
+        row.addWidget(self.remote_edit, 1)
+        row.addWidget(self.remote_btn)
+        row.addWidget(self.remote_label)
+        return row
+
+    def _load_remote_link(self) -> str:
+        try:
+            import json
+            return json.loads(self._REMOTE_SETTINGS.read_text(encoding="utf-8")).get("link", "")
+        except (OSError, ValueError):
+            return ""
+
+    def _save_remote_link(self) -> None:
+        # Kept beside the GUI, never in a config: the link carries the server's access token.
+        try:
+            import json
+            self._REMOTE_SETTINGS.write_text(
+                json.dumps({"link": self.remote_edit.text().strip()}), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _toggle_remote(self):
+        if self.remote is not None:
+            self._set_remote(None, None)
+            self.log("Disconnected from the remote server -- jobs run locally again.")
+            return
+        try:
+            client = RemoteClient(self.remote_edit.text())
+        except RemoteError as exc:
+            self.log(f"Remote: {exc}")
+            return
+        self.remote_btn.setEnabled(False)
+        self.remote_label.setText("connecting...")
+        call = RemoteCall(lambda: client.status(retries=15))
+        call.done.connect(lambda status: self._on_remote_status(client, status))
+        call.failed.connect(self._on_remote_failed)
+        self._spawn(call)
+
+    def _on_remote_failed(self, message: str):
+        self.remote_btn.setEnabled(True)
+        self.remote_label.setText("local")
+        self.log(f"Remote: could not connect -- {message}")
+
+    def _on_remote_status(self, client: RemoteClient, status: dict):
+        self.remote_btn.setEnabled(True)
+        self._set_remote(client, status)
+        self._save_remote_link()
+        gpus = status.get("gpus") or []
+        names = ", ".join(sorted({g["name"] for g in gpus})) or "no NVIDIA GPU found"
+        mode = status.get("mode")
+        self.log(f"Connected to {status.get('hostname')} ({client.base}): {len(gpus)} GPU(s) "
+                 f"[{names}], trainer {status.get('commit') or '?'} at {status.get('root')}.")
+        if mode == "receive":
+            self.log("That server is in receive mode: Start Training sends the config to it and the "
+                     "waiting notebook cell returns its path -- run training from the next cell.")
+        job = status.get("job")
+        if job and job.get("running") and not (self.runner and self.runner.isRunning()):
+            self.log(f"A job is running there ({job['id']}) -- following it.")
+            self._run(None, training="train" in (job.get("steps") or []),
+                      runner=RemoteRunner(client, f"remote {', '.join(job['steps'])}",
+                                          attach=job))
+
+    def _set_remote(self, client: RemoteClient | None, status: dict | None):
+        self.remote, self.remote_status = client, status
+        connected = client is not None
+        for box in self.gpu_boxes.values():
+            box.setVisible(not connected)
+        self.proc_label.setVisible(not connected)
+        self.remote_gpu_label.setVisible(connected)
+        self.remote_gpu_edit.setVisible(connected)
+        self.remote_edit.setReadOnly(connected)
+        self.remote_btn.setText("Disconnect" if connected else "Connect")
+        if connected:
+            n = len(status.get("gpus") or [])
+            self.remote_gpu_edit.setPlaceholderText(f"all {n}" if n else "all")
+            self.remote_label.setText(f"{status.get('hostname')} ({status.get('mode')})")
+        else:
+            self.remote_label.setText("local")
+        self._on_gpu_selection()
+        self._refresh()
+
+    def _spawn(self, call: RemoteCall) -> None:
+        """Keep a reference until the thread has finished -- and drop it a turn later, like
+        `_finished` does for runners: releasing a QThread inside its own signal tears it down
+        mid-emission."""
+        self._remote_calls.append(call)
+        call.finished.connect(lambda c=call: QtCore.QTimer.singleShot(
+            0, lambda: self._remote_calls.remove(c) if c in self._remote_calls else None))
+        call.start()
+
+    def _remote_gpus(self) -> str:
+        return self.remote_gpu_edit.text().strip().replace(" ", "")
+
+    def _remote_process_count(self) -> int:
+        gpus = self._remote_gpus()
+        if gpus:
+            return max(1, len([g for g in gpus.split(",") if g]))
+        return max(1, len((self.remote_status or {}).get("gpus") or []))
+
+    def _remote_start(self, config_path: Path, steps: list[str], training: bool):
+        client = self.remote
+        toml = Path(config_path).read_text(encoding="utf-8")
+        name = Path(config_path).stem
+        if (self.remote_status or {}).get("mode") == "receive":
+            if "train" not in steps:
+                self.log("The remote server is in receive mode: it only takes a config. Caching "
+                         "runs from the notebook with run(config).")
+                return
+            call = RemoteCall(lambda: client.send_config(toml, name))
+            call.done.connect(lambda r: self.log(
+                f"Config sent: saved on the remote machine as {r['path']}. The waiting notebook "
+                f"cell has returned it -- run training from the next cell, e.g. run(config)."))
+            call.failed.connect(lambda m: self.log(f"Remote: sending the config failed -- {m}"))
+            self._spawn(call)
+            return
+        gpus = self._remote_gpus()
+        label = f"remote {' + '.join(steps)} ({name})"
+
+        def submit():
+            check = client.validate(toml)
+            if not check.get("ok"):
+                raise RemoteError(f"the remote machine rejects this config: {check.get('error')}")
+            for warning in check.get("warnings", []):
+                runner.logSignal.emit(f"WARNING (remote): {warning}")
+            return client.run(toml, name, steps, gpus=gpus)
+
+        runner = RemoteRunner(client, label, start=submit)
+        self._run(None, training=training, runner=runner)
+
+    def _remote_signal(self, name: str):
+        client = self.remote or getattr(self.runner, "client", None)
+        call = RemoteCall(lambda: client.signal(name))
+        call.done.connect(lambda r: self.log(
+            "Save requested on the remote run -- it saves at the next optimizer step."
+            if name == "save" else
+            "Save & stop requested on the remote run -- it saves a resumable checkpoint at the "
+            "next optimizer step, then exits."))
+        call.failed.connect(lambda m: self.log(f"Remote: {m}"))
+        self._spawn(call)
+
     def closeEvent(self, event):
+        if isinstance(self.runner, RemoteRunner) and self.runner.isRunning():
+            # Closing the laptop's GUI must not end a run on the GPU box: stop following it.
+            # Connect again later and the GUI reattaches to it.
+            self.runner.detach()
+            self.runner.wait(8000)
+            self._save_remote_link()
+            prevent_sleep(False)
+            event.accept()
+            return
+        self._save_remote_link()
         if self.runner is not None and self.runner.isRunning():
             answer = QtWidgets.QMessageBox.question(
                 self, "Training is running",
