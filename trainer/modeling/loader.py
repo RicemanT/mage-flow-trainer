@@ -70,7 +70,10 @@ def load_components(
     tokenizer_path=None,
     compressed_adaln_dtype="float32",
     flux2_vae=False,
+    vae_decoder=False,
 ):
+    """`vae_decoder=True` loads the VAE for decoding (validation samples): Mage-VAE keeps its
+    decoder and drops the encoder instead of the other way round."""
     path = Path(path)
     transformer = None
     if load_transformer:
@@ -170,7 +173,10 @@ def load_components(
         else:
             from .modules.mage_vae import MageVAE
             vae = MageVAE(str(vae_path or path / "vae/diffusion_pytorch_model.safetensors"), sample_posterior=False)
-            del vae.decoder_model
+            if vae_decoder:
+                del vae.dconv_encoder
+            else:
+                del vae.decoder_model
         vae.requires_grad_(False).eval().to(dtype=dtype)
     return MageFlowComponents(transformer, encoder, vae, tokenizer)
 

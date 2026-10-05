@@ -221,6 +221,27 @@ SPEC: dict[str, Spec] = {
         "replace the caption with texture.trigger, so an uncaptioned flat colour would train the "
         "unconditional branch, and CFG subtracts the unconditional.",
         F.SubsetEditor),
+    "dataset.subsets_file": _spec(
+        "Subsets file",
+        "A CSV / JSON / TOML listing folders, for datasets with too many folders to list here -- "
+        "one per artist. Illustration Scrapping Studio's training-layout export (folders.csv, "
+        "folders.json or dataset.toml) works as written; any CSV with a `path` column and "
+        "optional `num_repeats`/`repeats` and `texture` does too. Folders with 0 repeats or 0 "
+        "images are skipped. Combines with the rows above; replaces Dataset path.",
+        lambda: F.PathEditor("file")),
+    "dataset.subsets_root": _spec(
+        "Subsets root (optional)",
+        "Re-root every folder from the subsets file under this directory, keeping only its "
+        "folder name. For a file written on another machine: /home/jovyan/lib/images/emily "
+        "becomes <root>/emily.",
+        lambda: F.PathEditor("folder")),
+    "dataset.latent_dtype": _spec(
+        "Latent cache precision",
+        "Precision newly cached latents are stored in. float16 halves the cache (a 1024px "
+        "latent is 2 MB in float32) at ~5e-4 relative rounding, far below the VAE's own error; "
+        "training reads either. Existing caches keep theirs -- `python -m "
+        "trainer.tools.cache_latents convert --config <toml>` rewrites them in place.",
+        lambda: F.ChoiceEditor(["float32", "float16", "bfloat16"])),
     "dataset.source": _spec(
         "Source",
         "auto = use cached latents when present, else encode images. latents = cache only, which "
@@ -405,6 +426,31 @@ SPEC: dict[str, Spec] = {
     "dataset.caption.min_tags_kept": _spec(
         "Min tags kept", "Dropout never takes a caption below this many tags.",
         lambda: F.IntEditor(0, 50)),
+    "dataset.caption.attribution_patterns": _spec(
+        "Attribution patterns",
+        "Regexes, one per line, case-insensitive, that mark a tag or NL sentence as an artist / "
+        "trigger attribution -- e.g. ^drawn by\\s for `Drawn by emily (pure dream)`. Matched "
+        "anywhere in the caption, and a post crediting several artists has several. Empty "
+        "turns the feature off.",
+        lambda: F.LineListEditor("^drawn by\\s", height=54)),
+    "dataset.caption.attribution_position": _spec(
+        "Attribution position",
+        "fixed pins attribution entries to the front of their field (tags or NL) in their "
+        "original order, whatever shuffling does. random lets each land anywhere in its field "
+        "(still exactly one copy).",
+        lambda: F.ChoiceEditor(["fixed", "random"])),
+    "dataset.caption.attribution_dropout_immune": _spec(
+        "Attribution immune to dropout",
+        "Take attribution entries out before tag dropout and shuffling, so a trigger is never "
+        "dropped. Off treats them like any other tag.",
+        lambda: F.BoolEditor("Attribution is never dropped"), inline_label=True),
+    "dataset.caption.attribution_dedupe_on_combine": _spec(
+        "Dedupe attribution on tags+NL",
+        "tags_nl / nl_tags join both fields, and datasets carry `Drawn by X` in both so it "
+        "survives any variant. On: the trailing field's copy of an attribution the leading field "
+        "already has is removed, so it appears once. Attributions only in the trailing field "
+        "are kept.",
+        lambda: F.BoolEditor("Write each attribution once in combined captions"), inline_label=True),
     "dataset.caption.protected_tags": _spec(
         "Protected tags",
         "Never dropped, never shuffled out of position. Comma separated. Verified 3000/3000.",
@@ -550,8 +596,20 @@ SPEC: dict[str, Spec] = {
         "rex and rerex hold the LR near peak far longer than cosine. Both were ported from "
         "sd-scripts and verified to 0.0 max|diff| against it -- but there `d` is hardcoded and "
         "here every parameter is tunable.\n\nReRex is MONOTONE, not a warm-restart schedule: "
-        "segment i ends exactly where i+1 begins.",
-        lambda: F.ChoiceEditor(["constant", "cosine", "linear", "rex", "rerex"])),
+        "segment i ends exactly where i+1 begins.\n\nstage is StageLR: chained linear / cosine / "
+        "constant / REX segments, each a percentage of the run, with absolute LRs (see the "
+        "StageLR table).",
+        lambda: F.ChoiceEditor(["constant", "cosine", "linear", "rex", "rerex", "stage"])),
+    "schedule.stages": _spec(
+        "StageLR stages",
+        "Segments in order, sized as a percentage of the post-warmup run (must total 100%). The "
+        "run's exact optimizer-step count is known before step 1, so lengths are fitted to it "
+        "exactly and printed at startup.\n\nLR is absolute: linear/cosine move from where the "
+        "previous stage ended to it, constant holds it, rex decays from it to Min LR. The first "
+        "stage starts from Optimizer LR. Groups with a component LR follow the same curve scaled "
+        "by their ratio to Optimizer LR.\n\nSame table format as the diffusion-pipe fork's "
+        "[StageLR] stages, so those lists paste into the TOML unchanged.",
+        lambda: F.StageListEditor()),
     "schedule.warmup_steps": _spec(
         "Warmup steps", "Linear ramp from 0 to the peak LR.", lambda: F.IntEditor(0, 100_000)),
     "schedule.min_lr_ratio": _spec(
@@ -652,6 +710,115 @@ SPEC: dict[str, Spec] = {
         "What keeps small updates from vanishing into a quantized master weight. Leave on for "
         "`training` mode.",
         lambda: F.BoolEditor("Stochastic rounding"), inline_label=True),
+
+    # ------------------------------------------------------------------ monitoring
+    "tracking.backends": _spec(
+        "Trackers",
+        "Where metrics (loss, LR per component, grad norm, throughput, memory, ETA), eval loss "
+        "and validation samples go, besides the console and the Metrics tab. Any combination.\n\n"
+        "tensorboard: local files under the run's tracking/ folder.\nwandb: needs WANDB_API_KEY "
+        "or `wandb login` on the training machine -- never put a key in the config, which is "
+        "copied into every checkpoint.\ntrackio: local dashboard (`trackio show`), a Hugging Face "
+        "Space, or your own server; no network needed in local mode.\n\nA tracker that fails is "
+        "disabled with a warning; training never stops for it.",
+        lambda: F.CheckSetEditor(["tensorboard", "wandb", "trackio"])),
+    "tracking.project": _spec("Project", "wandb/Trackio project name.",
+                              lambda: F.TextEditor("mage-flow")),
+    "tracking.run_name": _spec("Tracker run name", "Empty uses the training run name.",
+                               lambda: F.OptTextEditor("= run name")),
+    "tracking.log_dir": _spec(
+        "Tracking folder", "TensorBoard and local Trackio/wandb files. Empty = "
+        "<output_dir>/<run_name>/tracking.", lambda: F.PathEditor("folder")),
+    "tracking.resume_run": _spec(
+        "Continue tracker run on resume",
+        "A resumed training continues the same wandb run (id kept in the run folder) and the "
+        "same Trackio run, so its curves stay one line.",
+        lambda: F.BoolEditor("Continue the same tracker run when resuming"), inline_label=True),
+    "tracking.wandb_entity": _spec("wandb entity", "Team or user. Empty = your default.",
+                                   lambda: F.OptTextEditor("default")),
+    "tracking.wandb_mode": _spec(
+        "wandb mode", "offline writes the run to disk; upload it later with `wandb sync`.",
+        lambda: F.ChoiceEditor(["online", "offline"])),
+    "tracking.wandb_base_url": _spec("wandb server", "Self-hosted W&B URL. Empty = wandb.ai.",
+                                     lambda: F.OptTextEditor("https://api.wandb.ai")),
+    "tracking.wandb_tags": _spec("wandb tags", "One per line.",
+                                 lambda: F.LineListEditor("one tag per line", height=48)),
+    "tracking.wandb_offline_on_failure": _spec(
+        "wandb offline fallback",
+        "If the online start fails (network block, bad key), log offline instead of losing the "
+        "run's data.", lambda: F.BoolEditor("Fall back to offline on failure"), inline_label=True),
+    "tracking.trackio_space_id": _spec(
+        "Trackio Space", "e.g. user/my-dashboard. Uses your Hugging Face login. Empty = local.",
+        lambda: F.OptTextEditor("local")),
+    "tracking.trackio_server_url": _spec(
+        "Trackio server", "Self-hosted Trackio server URL. Empty = local.",
+        lambda: F.OptTextEditor("local")),
+
+    "sampling.prompts": _spec(
+        "Sample prompts",
+        "One prompt per line. Empty = no validation samples.\n\nA line can be an inline table "
+        "overriding settings for that prompt:\n{ prompt = \"a castle\", width = 1216, height = "
+        "832, seed = 7, cfg = 4 }\n\nPrompts are encoded once with the training captions, so "
+        "sampling never keeps the text encoder loaded. Images go to <run>/samples/ and to the "
+        "trackers.",
+        lambda: F.PromptListEditor("Drawn by emily (pure dream), 1girl, smile, outdoors")),
+    "sampling.every_n_steps": _spec("Sample every N steps", "Empty = off.",
+                                    lambda: F.OptIntEditor("off")),
+    "sampling.every_n_epochs": _spec("Sample every N epochs", "Empty = off.",
+                                     lambda: F.OptIntEditor("off")),
+    "sampling.at_start": _spec(
+        "Sample before training", "A baseline round at step 0 (skipped on resume).",
+        lambda: F.BoolEditor("Sample the untrained model first"), inline_label=True),
+    "sampling.steps": _spec("Sampling steps", "Euler steps per image. Reference default 30.",
+                            lambda: F.IntEditor(1, 500)),
+    "sampling.cfg": _spec("CFG scale", "1 or below skips the negative pass (half the cost).",
+                          lambda: F.FloatEditor(0.0, 30.0, 0.5, 2)),
+    "sampling.shift": _spec("Sampling shift", "Static flow shift at inference. Mage-Flow uses 6.",
+                            lambda: F.FloatEditor(0.01, 100.0, 0.5, 2)),
+    "sampling.width": _spec("Width", "Multiple of 16.", lambda: F.IntEditor(64, 4096, 16)),
+    "sampling.height": _spec("Height", "Multiple of 16.", lambda: F.IntEditor(64, 4096, 16)),
+    "sampling.negative_prompt": _spec(
+        "Negative prompt", "Blank (a single space) is the reference default.",
+        lambda: F.TextEditor(" ", strip=False)),
+    "sampling.seed": _spec("Seed", "Base seed for every prompt unless it sets its own.",
+                           lambda: F.IntEditor(0, 2**31 - 1)),
+    "sampling.seed_strategy": _spec(
+        "Seed strategy",
+        "fixed: same noise every round, so changes between rounds come from training. walk: "
+        "seed + round number, for variety.", lambda: F.ChoiceEditor(["fixed", "walk"])),
+    "sampling.renormalize_cfg": _spec(
+        "Renormalize CFG",
+        "Rescale the guided velocity to the conditional one's norm; reduces oversaturation at "
+        "high CFG.", lambda: F.BoolEditor("CFG renormalization"), inline_label=True),
+    "sampling.save_to_disk": _spec(
+        "Save samples to disk", "PNG files plus prompts.json under <run>/samples/<step>/.",
+        lambda: F.BoolEditor("Save sample PNGs"), inline_label=True),
+
+    "eval.path": _spec(
+        "Eval folder",
+        "Held-out images (cached like any subset; Cache latents includes it). Each eval round "
+        "scores the same images at the same timestep quantiles against the same noise with "
+        "un-augmented captions, so the curve moves only when the model does -- unlike training "
+        "loss. Empty = off.",
+        lambda: F.PathEditor("folder")),
+    "eval.every_n_steps": _spec("Eval every N steps", "Empty = off.",
+                                lambda: F.OptIntEditor("off")),
+    "eval.every_n_epochs": _spec("Eval every N epochs", "Empty = off.",
+                                 lambda: F.OptIntEditor("off")),
+    "eval.at_start": _spec("Eval before training", "Baseline at step 0 (skipped on resume).",
+                           lambda: F.BoolEditor("Evaluate the untrained model first"),
+                           inline_label=True),
+    "eval.quantiles": _spec(
+        "Timestep quantiles",
+        "Quantiles of the training timestep distribution (shift included) to score at. Logged "
+        "per quantile and as their mean: low quantiles track detail, high ones composition.",
+        lambda: F.FloatListEditor("0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9")),
+    "eval.batch_size": _spec("Eval batch size", "Images per forward, within one bucket.",
+                             lambda: F.IntEditor(1, 256)),
+    "eval.max_samples": _spec("Eval max images", "Cap; a fixed spread of the folder. Empty = all.",
+                              lambda: F.OptIntEditor("all")),
+    "eval.seed": _spec("Eval noise seed", "Fixes the per-image noise.",
+                       lambda: F.IntEditor(0, 2**31 - 1)),
 }
 
 
@@ -661,6 +828,7 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
     ("Dataset", [
         ("Dataset Source", [
             "dataset.path", "dataset.source", "dataset.num_repeats", "dataset.subsets",
+            "dataset.subsets_file", "dataset.subsets_root", "dataset.latent_dtype",
         ]),
         ("Resolution", [
             "dataset.resolution", "dataset.resolutions", "dataset.tier_collapse",
@@ -694,6 +862,11 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
             "dataset.caption.tag_dropout_percent", "dataset.caption.min_tags_kept",
             "dataset.caption.caption_dropout_percent", "dataset.caption.protected_tags",
             "dataset.caption.nl_shuffle_sentences", "dataset.caption.nl_keep_first_sentence",
+        ]),
+        ("Artist Attribution", [
+            "dataset.caption.attribution_patterns", "dataset.caption.attribution_position",
+            "dataset.caption.attribution_dropout_immune",
+            "dataset.caption.attribution_dedupe_on_combine",
         ]),
     ]),
     ("Training", [
@@ -742,6 +915,9 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
             "schedule.d", "schedule.global_d", "schedule.local_d", "schedule.weight_power",
             "schedule.num_segments",
         ]),
+        ("StageLR", [
+            "schedule.stages",
+        ]),
     ]),
     ("Method", [
         ("Adapter", [
@@ -774,6 +950,29 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
             "quant.group_size", "quant.dynamic_loss_threshold",
         ]),
     ]),
+    ("Monitoring", [
+        ("Experiment Tracking", [
+            "tracking.backends", "tracking.project", "tracking.run_name", "tracking.log_dir",
+            "tracking.resume_run",
+        ]),
+        ("Weights & Biases", [
+            "tracking.wandb_entity", "tracking.wandb_mode", "tracking.wandb_base_url",
+            "tracking.wandb_tags", "tracking.wandb_offline_on_failure",
+        ]),
+        ("Trackio", [
+            "tracking.trackio_space_id", "tracking.trackio_server_url",
+        ]),
+        ("Validation Samples", [
+            "sampling.prompts", "sampling.every_n_steps", "sampling.every_n_epochs",
+            "sampling.at_start", "sampling.steps", "sampling.cfg", "sampling.shift",
+            "sampling.width", "sampling.height", "sampling.negative_prompt", "sampling.seed",
+            "sampling.seed_strategy", "sampling.renormalize_cfg", "sampling.save_to_disk",
+        ]),
+        ("Held-out Eval", [
+            "eval.path", "eval.every_n_steps", "eval.every_n_epochs", "eval.at_start",
+            "eval.quantiles", "eval.batch_size", "eval.max_samples", "eval.seed",
+        ]),
+    ]),
 ]
 
 
@@ -786,6 +985,7 @@ def layout_keys() -> list[str]:
 RAW_GROUP_TITLES.update({
     "Dataset Source", "Model / Output", "Checkpoints", "Logging", "Batching",
     "Aspect Ratio Bucketing", "Memory / Precision", "torch.compile",
+    "Experiment Tracking", "Weights & Biases", "Trackio", "Validation Samples", "Held-out Eval",
 })
 TRANSFORMED_GROUP_TITLES.update({
     "Resolution", "Captions", "Caption Augmentation", "Flow Matching",
@@ -793,5 +993,5 @@ TRANSFORMED_GROUP_TITLES.update({
     "High-Frequency Token Loss", "Adapter", "Text Encoder Adapter", "LoKr",
     "Concept Preservation", "Full Finetuning",
     "SDNQ Quantization", "Learning Rate Schedule", "REX / ReREX",
-    "Per-Component Learning Rates", "Optimizer State",
+    "Per-Component Learning Rates", "Optimizer State", "Artist Attribution", "StageLR",
 })

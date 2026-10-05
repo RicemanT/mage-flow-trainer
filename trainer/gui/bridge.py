@@ -31,13 +31,16 @@ from ..data.dataset import DatasetConfig
 from ..training.config import (
     AdapterConfig,
     ComponentLRs,
+    EvalConfig,
     FlowConfig,
     OptimizerConfig,
     PreserveConfig,
     QuantConfig,
     RTIConfig,
+    SamplingConfig,
     SelfFlowConfig,
     ScheduleConfig,
+    TrackingConfig,
     TrainConfig,
     load_config,
 )
@@ -58,6 +61,9 @@ SECTIONS: dict[str, type] = {
     "component_lr": ComponentLRs,
     "rti": RTIConfig,
     "self_flow": SelfFlowConfig,
+    "tracking": TrackingConfig,
+    "sampling": SamplingConfig,
+    "eval": EvalConfig,
 }
 
 # Fields that exist on a dataclass but are not config keys in their own section -- they are
@@ -84,7 +90,9 @@ def schema() -> dict[str, dc.Field]:
 
 
 # Advanced TOML settings intentionally omitted from the Mage-Flow GUI.
-CLI_ONLY_KEYS = {"adapter.components", "adapter.init", "adapter.init_cache"} | {
+# `train.model_family` has one value since the trainer became Mage-Flow-only (auto resolves to it).
+CLI_ONLY_KEYS = {"adapter.components", "adapter.init", "adapter.init_cache",
+                 "train.model_family"} | {
     key for key in schema()
     if key.startswith(("preserve.", "component_lr.")) and key != "component_lr.adaln"
 }
@@ -183,12 +191,15 @@ def prune_defaults(flat: dict) -> dict:
         out.pop("dataset.resolution", None)
     else:
         out.pop("dataset.resolutions", None)
-    # Same rule, same reason: `path` and `subsets` are mutually exclusive in the loader, and the
-    # GUI keeps a value in the path box even after subsets are added. Emit the one in effect.
-    if out.get("dataset.subsets"):
+    # Same rule, same reason: `path` and `subsets` / `subsets_file` are mutually exclusive in the
+    # loader, and the GUI keeps a value in the path box even after subsets are added. Emit the one
+    # in effect.
+    if out.get("dataset.subsets") or out.get("dataset.subsets_file"):
         out.pop("dataset.path", None)
     else:
         out.pop("dataset.subsets", None)
+    if not out.get("dataset.subsets_file"):
+        out.pop("dataset.subsets_root", None)
     return out
 
 
@@ -282,6 +293,16 @@ def summarize(flat: dict) -> str:
         bits.append(f"sdnq {quant}/{flat.get('quant.weights_dtype', 'int8')}")
     if flat.get("train.compile"):
         bits.append(f"compile {flat['train.compile']}")
+    if flat.get("schedule.kind") == "stage":
+        bits.append(f"StageLR {len(flat.get('schedule.stages') or [])} stage(s)")
+    if flat.get("dataset.caption.attribution_patterns"):
+        bits.append("attribution")
+    if flat.get("tracking.backends"):
+        bits.append("+".join(flat["tracking.backends"]))
+    if flat.get("sampling.prompts"):
+        bits.append(f"{len(flat['sampling.prompts'])} sample prompt(s)")
+    if flat.get("eval.path"):
+        bits.append("eval")
     return "  ".join(bits)
 
 

@@ -11,13 +11,25 @@ exact embedding matches. Latent caching remains independent of either text-encod
 
 from __future__ import annotations
 
+import functools
 import random
-from dataclasses import dataclass, field
+import re
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 CaptionMode = str  # "tags" | "nl" | "tags_nl" | "nl_tags" | "mixed"
 
 _VARIANTS = ("tags", "nl", "tags_nl", "nl_tags")
+
+# Fields added by the attribution feature. Kept out of a caption config's identity while they sit at
+# their defaults, so turning the feature on is the only thing that invalidates existing
+# caption-variation caches -- see `caption_identity`.
+_ATTRIBUTION_DEFAULTS = {
+    "attribution_patterns": [],
+    "attribution_position": "fixed",
+    "attribution_dropout_immune": True,
+    "attribution_dedupe_on_combine": True,
+}
 
 
 @dataclass
@@ -40,6 +52,22 @@ class CaptionConfig:
     nl_shuffle_sentences: bool = False
     nl_keep_first_sentence: bool = False
 
+    # Artist/trigger attribution, e.g. `Drawn by emily (pure dream)`. Each pattern is a
+    # case-insensitive regex matched against every tag and every NL sentence; a match is an
+    # attribution entry wherever it sits, and a post crediting several artists has several. Empty
+    # = feature off, and off is byte-identical to the feature not existing.
+    attribution_patterns: list[str] = field(default_factory=list)
+    # "fixed" pins attribution entries to the front of their field (tags or NL), in their original
+    # order, whatever shuffling does. "random" lets each land anywhere in its field.
+    attribution_position: str = "fixed"
+    # Pull attribution entries out before tag dropout / shuffling so they can never be dropped.
+    # False leaves them in the ordinary pool (dropout and shuffle apply; "fixed" still pins
+    # whichever survive).
+    attribution_dropout_immune: bool = True
+    # tags_nl / nl_tags join both fields, so an attribution present in both would appear twice.
+    # True strips the trailing field's copy of any attribution the leading field already carries.
+    attribution_dedupe_on_combine: bool = True
+
     def __post_init__(self):
         if self.caption_mode not in (*_VARIANTS, "mixed"):
             raise ValueError(f"unknown caption_mode: {self.caption_mode}")
@@ -50,6 +78,21 @@ class CaptionConfig:
             raise ValueError("tag_dropout_percent must be in [0,1]")
         if not 0.0 <= self.caption_dropout_percent <= 1.0:
             raise ValueError("caption_dropout_percent must be in [0,1]")
+        if isinstance(self.attribution_patterns, str):
+            self.attribution_patterns = [self.attribution_patterns]
+        self.attribution_patterns = [str(p) for p in self.attribution_patterns if str(p).strip()]
+        for p in self.attribution_patterns:
+            try:
+                re.compile(p, re.IGNORECASE)
+            except re.error as exc:
+                raise ValueError(f"dataset.caption.attribution_patterns: invalid regex {p!r}: {exc}")
+        if self.attribution_position not in ("fixed", "random"):
+            raise ValueError("dataset.caption.attribution_position must be 'fixed' or 'random', "
+                             f"got {self.attribution_position!r}")
+
+    @property
+    def attribution_enabled(self) -> bool:
+        return bool(self.attribution_patterns)
 
     @classmethod
     def from_dict(cls, d: dict) -> CaptionConfig:
@@ -79,8 +122,28 @@ def split_tags(caption: str, delimiter: str = ", ") -> list[str]:
     return [t.strip() for t in caption.split(sep) if t.strip()]
 
 
-def process_tags(tags: list[str], cfg: CaptionConfig, rng: random.Random) -> list[str]:
-    """Apply dropout then shuffling, respecting protected and pinned-leading tags."""
+def caption_identity(cfg: CaptionConfig) -> dict:
+    """The caption config as a plain dict, for cache keys.
+
+    The attribution fields are omitted while the feature is off, so a config that does not use it
+    keys exactly as it did before the fields existed and existing caption-variation caches stay
+    valid. With patterns set, all four are part of the identity.
+    """
+    data = asdict(cfg)
+    if not cfg.attribution_enabled:
+        for key in _ATTRIBUTION_DEFAULTS:
+            data.pop(key, None)
+    return data
+
+
+def process_tags(tags: list[str], cfg: CaptionConfig, rng: random.Random,
+                 extra_kept: int = 0) -> list[str]:
+    """Apply dropout then shuffling, respecting protected and pinned-leading tags.
+
+    `extra_kept` counts tags held out of this list that will be in the final caption anyway --
+    attribution entries pulled out before dropout -- so `min_tags_kept` floors the caption, not
+    just the part of it this function sees.
+    """
     if not tags:
         return tags
 
@@ -94,7 +157,8 @@ def process_tags(tags: list[str], cfg: CaptionConfig, rng: random.Random) -> lis
 
         n_drop = int(len(droppable) * cfg.tag_dropout_percent + 0.5)
         # Enforce the floor across the whole caption, not just the droppable subset.
-        max_droppable = max(0, len(head) + len(keepable) + len(droppable) - cfg.min_tags_kept)
+        max_droppable = max(0, extra_kept + len(head) + len(keepable) + len(droppable)
+                            - cfg.min_tags_kept)
         n_drop = min(n_drop, max_droppable)
 
         if n_drop > 0:
@@ -127,8 +191,18 @@ def process_nl(nl: str, cfg: CaptionConfig, rng: random.Random) -> str:
     else:
         rng.shuffle(parts)
 
-    out = ". ".join(parts)
-    return out if out.endswith(".") else out + "."
+    return _join_sentences(parts)
+
+
+def _split_sentences(nl: str) -> list[str]:
+    return [s.strip() for s in nl.split(". ") if s.strip()]
+
+
+def _join_sentences(parts: list[str]) -> str:
+    # Only the original last sentence carries its full stop, so after a shuffle it can land in the
+    # middle; stripping before joining keeps that from producing "...stands.. The girl".
+    out = ". ".join(p.rstrip(".") for p in parts)
+    return out if not out or out.endswith(".") else out + "."
 
 
 def select_variant(cfg: CaptionConfig, has_nl: bool, rng: random.Random) -> str:
@@ -164,6 +238,9 @@ def build_caption(
 
     variant = select_variant(cfg, bool(nl_text), rng)
 
+    if cfg.attribution_enabled:
+        return _build_attributed(tags_text, nl_text, variant, cfg, rng)
+
     tags = process_tags(split_tags(tags_text, cfg.tag_delimiter), cfg, rng)
     tags_str = cfg.tag_delimiter.join(tags)
 
@@ -175,6 +252,124 @@ def build_caption(
     if variant == "tags_nl":
         return f"{tags_str}. {nl_str}" if tags_str else nl_str
     if variant == "nl_tags":
+        return f"{nl_str} {tags_str}" if tags_str else nl_str
+    raise AssertionError(f"unreachable variant {variant}")
+
+
+# --------------------------------------------------------------------------- attribution
+#
+# An attribution entry is one tag, or one NL sentence, matching `attribution_patterns` -- usually
+# `Drawn by <artist>`. Datasets carry the same phrase in both the tags and the NL caption so the
+# trigger survives whichever variant a step picks, which creates the two problems handled here:
+# shuffling and dropout treat a trigger like decoration, and the combined variants repeat it.
+# Ported from the diffusion-pipe-mageflow-ft fork, generalised to captions crediting several
+# artists (that fork pulled out only the first match, so a second artist was still dropped).
+
+
+@functools.lru_cache(maxsize=32)
+def _compiled(patterns: tuple[str, ...]) -> tuple[re.Pattern, ...]:
+    return tuple(re.compile(p, re.IGNORECASE) for p in patterns)
+
+
+def is_attribution(entry: str, cfg: CaptionConfig) -> bool:
+    text = entry.strip()
+    return any(p.search(text) for p in _compiled(tuple(cfg.attribution_patterns)))
+
+
+def _attribution_key(entry: str) -> str:
+    """Comparable form, so `Drawn by Emily` (a tag) and `drawn by emily.` (a sentence) match."""
+    return " ".join(entry.strip().rstrip(".").split()).casefold()
+
+
+def _split_attribution(entries: list[str], cfg: CaptionConfig) -> tuple[list[str], list[str]]:
+    attrs = [e for e in entries if is_attribution(e, cfg)]
+    rest = [e for e in entries if not is_attribution(e, cfg)]
+    return attrs, rest
+
+
+def _place(entries: list[str], attrs: list[str], cfg: CaptionConfig,
+           rng: random.Random) -> list[str]:
+    if not attrs:
+        return entries
+    if cfg.attribution_position == "random":
+        out = list(entries)
+        for a in attrs:
+            out.insert(rng.randint(0, len(out)), a)
+        return out
+    return attrs + entries
+
+
+def _process_tags_attributed(tags: list[str], cfg: CaptionConfig,
+                             rng: random.Random) -> list[str]:
+    if cfg.attribution_dropout_immune:
+        attrs, rest = _split_attribution(tags, cfg)
+        return _place(process_tags(rest, cfg, rng, extra_kept=len(attrs)), attrs, cfg, rng)
+    out = process_tags(tags, cfg, rng)
+    if cfg.attribution_position == "fixed":
+        attrs, rest = _split_attribution(out, cfg)
+        return attrs + rest
+    return out
+
+
+def _process_nl_attributed(nl: str, cfg: CaptionConfig, rng: random.Random) -> str:
+    parts = _split_sentences(nl)
+    attrs, rest = _split_attribution(parts, cfg)
+    if not attrs:
+        return process_nl(nl, cfg, rng)
+    if not cfg.attribution_dropout_immune:
+        # In the ordinary pool: shuffled like any other sentence, then pinned if "fixed".
+        rest = parts
+        attrs = []
+    if cfg.nl_shuffle_sentences and len(rest) > 1:
+        if cfg.nl_keep_first_sentence:
+            head, tail = rest[:1], rest[1:]
+            rng.shuffle(tail)
+            rest = head + tail
+        else:
+            rest = list(rest)
+            rng.shuffle(rest)
+    if attrs:
+        rest = _place(rest, attrs, cfg, rng)
+    elif cfg.attribution_position == "fixed":
+        pinned, others = _split_attribution(rest, cfg)
+        rest = pinned + others
+    return _join_sentences(rest)
+
+
+def _drop_duplicate_attribution(entries: list[str], leading: list[str],
+                                cfg: CaptionConfig) -> list[str]:
+    """Remove attribution entries the leading field already carries. Others are kept: a tag list
+    crediting two artists and an NL caption naming one should still name both once."""
+    keys = {_attribution_key(e) for e in leading if is_attribution(e, cfg)}
+    if not keys:
+        return entries
+    return [e for e in entries if not (is_attribution(e, cfg) and _attribution_key(e) in keys)]
+
+
+def _build_attributed(tags_text: str, nl_text: str | None, variant: str, cfg: CaptionConfig,
+                      rng: random.Random) -> str:
+    # Same draw order as the plain path: tags are always processed, the NL only when used.
+    tags = _process_tags_attributed(split_tags(tags_text, cfg.tag_delimiter), cfg, rng)
+    if variant == "tags":
+        return cfg.tag_delimiter.join(tags)
+    nl_str = _process_nl_attributed(nl_text or "", cfg, rng)
+    if variant == "nl":
+        return nl_str
+    dedupe = cfg.attribution_dedupe_on_combine
+    if variant == "tags_nl":
+        if dedupe:
+            sentences = _split_sentences(nl_str)
+            kept = _drop_duplicate_attribution(sentences, tags, cfg)
+            if len(kept) != len(sentences):
+                nl_str = _join_sentences(kept)
+        tags_str = cfg.tag_delimiter.join(tags)
+        if not nl_str:
+            return tags_str
+        return f"{tags_str}. {nl_str}" if tags_str else nl_str
+    if variant == "nl_tags":
+        if dedupe:
+            tags = _drop_duplicate_attribution(tags, _split_sentences(nl_str), cfg)
+        tags_str = cfg.tag_delimiter.join(tags)
         return f"{nl_str} {tags_str}" if tags_str else nl_str
     raise AssertionError(f"unreachable variant {variant}")
 

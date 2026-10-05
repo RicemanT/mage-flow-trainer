@@ -118,6 +118,25 @@ def cache_launch(
                   env={"CUDA_VISIBLE_DEVICES": gpus} if gpus else {})
 
 
+def cache_config_launch(config_path: str | Path, *, gpus: str = "", dry_run: bool = False,
+                        overwrite: bool = False) -> Launch:
+    """Cache every folder a config uses -- inline subsets, `subsets_file`, `[eval]` -- in one
+    process, with the config's own bucket, VAE and storage-precision settings.
+
+    Replaces one `cache_launch` per folder: each of those loaded the VAE again, which is seconds
+    for a handful of folders and hours for a per-artist dataset of thousands.
+    """
+    argv = [_python(), "-u", "-m", "trainer.tools.cache_latents", "cache-config", str(config_path)]
+    if gpus and "," in gpus:
+        argv.extend(["--devices", gpus])
+    if overwrite:
+        argv.append("--overwrite")
+    if dry_run:
+        argv.append("--dry-run")
+    return Launch(argv, "cache latents" + (" (dry run)" if dry_run else ""), is_training=False,
+                  env={"CUDA_VISIBLE_DEVICES": gpus} if gpus else {})
+
+
 def concat_launch(output: str | Path, parents: list[tuple[str, float]]) -> Launch:
     """Combine finished LoRAs into their exact weighted sum (see `trainer.tools.concat_lora`).
 

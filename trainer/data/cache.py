@@ -19,6 +19,21 @@ Image.MAX_IMAGE_PIXELS = None  # dataset images legitimately exceed the decompre
 CACHE_SUFFIX = "_trainer.safetensors"
 CACHE_VERSION = "mageflow-1"
 
+# Storage precision of newly written caches. The VAE runs in the training dtype either way and the
+# trainer computes in float32 either way; this only decides the bytes on disk. float16 halves them
+# (a 1024px latent is 2 MB in float32) at ~5e-4 relative rounding -- far below the VAE's own
+# reconstruction error, and what diffusion-pipe has always used for its caches.
+LATENT_DTYPES = {"float32": torch.float32, "float16": torch.float16, "bfloat16": torch.bfloat16}
+
+
+def storable(latent: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    """`latent` in the storage dtype, or float32 if that would overflow (float16 tops out at
+    65504; a non-finite cache would poison every step that draws it)."""
+    out = latent.to(dtype)
+    if dtype != torch.float32 and not torch.isfinite(out).all():
+        return latent.to(torch.float32)
+    return out
+
 # `<stem>_WWWWxHHHH_trainer.safetensors` -- the bucket is recoverable from the name alone, which is
 # what lets a dataset run from latents after its source images have been deleted.
 _CACHE_RE = re.compile(rf"^(?P<stem>.+)_(?P<w>\d{{4,}})x(?P<h>\d{{4,}}){re.escape(CACHE_SUFFIX)}$")
@@ -71,11 +86,13 @@ def image_to_tensor(img: Image.Image) -> torch.Tensor:
 class LatentCacher:
     """Encode Mage-VAE posterior means without additional scaling or normalization."""
 
-    def __init__(self, vae, device: torch.device | str = "cuda", dtype: torch.dtype = torch.bfloat16, flux2_vae: bool = False):
+    def __init__(self, vae, device: torch.device | str = "cuda", dtype: torch.dtype = torch.bfloat16, flux2_vae: bool = False,
+                 storage_dtype: torch.dtype = torch.float32):
         self.vae = vae.to(device).eval()
         self.device = torch.device(device)
         self.dtype = dtype
         self.flux2_vae = flux2_vae
+        self.storage_dtype = storage_dtype
     @torch.no_grad()
     def encode_tensor(self, x: torch.Tensor) -> torch.Tensor:
         """[B,3,1,H,W] pixels -> [B,128,1,H/16,W/16], without rescaling."""
@@ -102,7 +119,7 @@ class LatentCacher:
         if out.exists() and not overwrite:
             return out, meta
 
-        latents = self.encode(img)
+        latents = storable(self.encode(img), self.storage_dtype)
         save_file(
             {"latents": latents.contiguous()},
             out,
@@ -137,7 +154,7 @@ class LatentCacher:
         written = []
         for (image_path, out, meta, _), latent in zip(prepared, latents):
             save_file(
-                {"latents": latent.contiguous()}, out,
+                {"latents": storable(latent, self.storage_dtype).contiguous()}, out,
                 metadata={
                     "version": CACHE_VERSION,
                     "bucket": f"{meta['bucket'][0]}x{meta['bucket'][1]}",
@@ -151,7 +168,9 @@ class LatentCacher:
 
 
 def load_cached_latent(path: str | Path) -> torch.Tensor:
-    tensor = load_file(path)["latents"]
+    # Always float32 out, whatever was stored: a dataset part-converted to float16 must still
+    # stack into one batch, and training computes in float32 regardless.
+    tensor = load_file(path)["latents"].float()
     parsed = parse_cache_filename(path)
     if tensor.ndim != 4 or tensor.shape[:2] != (128, 1):
         raise ValueError(f"{path}: expected Mage-VAE latents [128,1,h,w]; rebuild cache")

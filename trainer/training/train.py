@@ -40,6 +40,7 @@ from .params import (
     count_parameters,
 )
 from .preserve import ConceptPreserver
+from .tracking import Tracker, build_tracker
 from .quant import (
     quantize_module,
     quantized_layer_report,
@@ -227,6 +228,11 @@ class Trainer:
             raise ValueError("Optimi gradient release is single-GPU only. DDP can update "
                              "parameters before gradient synchronization; use the isolated "
                              "trainer.tools.probe_gradient_release diagnostic to investigate.")
+        # Inert until `train()` starts the configured backends, so nothing above can open a wandb
+        # run for a job that then fails to load its model.
+        self.tracker = Tracker()
+        self._samples_since_log = 0
+        self._grad_norm = None
         self._build_data()
         self._build_model()
         self._build_optimizer()
@@ -303,6 +309,23 @@ class Trainer:
         # otherwise inflate every estimate for the rest of the run.
         self._eta_anchor: tuple[float, int] | None = None
 
+        # Validation samples and held-out eval. Both are built before the model so their texts
+        # can be encoded with the training captions -- the only point at which the text encoder
+        # is guaranteed to be loaded when embeddings are cached.
+        self.evaluator = None
+        if cfg.eval.enabled:
+            from .evaluation import Evaluator
+            self.evaluator = Evaluator(cfg)
+        # Not `self.sampler`: that is the batch sampler.
+        self.validation_sampler = None
+        if cfg.sampling.enabled:
+            from .sampling import ValidationSampler
+            self.validation_sampler = ValidationSampler(self)
+        from .sampling import sample_texts
+        self.aux_texts = list(dict.fromkeys(
+            (sample_texts(cfg.sampling) if cfg.sampling.enabled else [])
+            + (self.evaluator.texts() if self.evaluator is not None else [])))
+
     # --------------------------------------------------------------- model
 
     def _build_model(self) -> None:
@@ -317,7 +340,10 @@ class Trainer:
         if cfg.train.cache_text_embeddings:
             # Keep text encoding from consuming the training Torch RNG stream.
             # This does not promise bitwise determinism of compiled CUDA kernels.
-            with torch.random.fork_rng(devices=[self.accelerator.device]):
+            device = self.accelerator.device
+            # Only CUDA devices have a forkable device RNG; a CPU run (MAGE_FLOW_ALLOW_CPU) has
+            # just the host stream, which fork_rng always covers.
+            with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
                 self._build_text_cache()
         needs_te = not cfg.train.cache_text_embeddings
         # Normally latents are cached and the VAE is 243MB of dead weight. Under
@@ -468,7 +494,8 @@ class Trainer:
         # the halfway point and trained the rest of the run at lr 0.
         scale = self.accelerator.num_processes
         schedule = replace(cfg.schedule, warmup_steps=cfg.schedule.warmup_steps * scale)
-        self.scheduler = build_scheduler(self.optimizer, schedule, self.total_steps * scale)
+        self.scheduler = build_scheduler(self.optimizer, schedule, self.total_steps * scale,
+                                         base_lr=cfg.optimizer.lr, process_scale=scale)
 
     def _prepare(self):
         raw_optimizer = self.optimizer
@@ -506,7 +533,7 @@ class Trainer:
         if cfg.train.caption_variations:
             return self._build_variation_cache()
         captions = sorted({build_caption(e.tags, e.nl, cfg.dataset.caption, random.Random(0))
-                           for e in self.dataset.entries})
+                           for e in self.dataset.entries} | set(getattr(self, "aux_texts", ())))
         if not captions:
             raise ValueError("No captions available for text embedding caching")
         components = load_components(cfg.train.model_path, self.dtype, **model_load_kwargs(cfg.train),
@@ -559,6 +586,9 @@ class Trainer:
             if accelerator.is_main_process:
                 cache.prepare(self.dataset.entries, cfg.dataset.caption, cfg.train.seed,
                               cfg.train.caption_variations)
+                # Sample prompts and eval captions ride along: encoded in the same pass, and on
+                # a warm cache already present, so sampling never loads the encoder itself.
+                cache.require(getattr(self, "aux_texts", ()))
                 self.accelerator.print(f"caption cache {cache.statistics}")
             accelerator.wait_for_everyone()
             if not accelerator.is_main_process:
@@ -801,6 +831,21 @@ class Trainer:
             _emit(self, "optim    gradient release enabled (single GPU; updates during backward)")
         trainable = [p for p in self._all_modules_params() if p.requires_grad]
         done = False
+        stopped_by_signal = False
+
+        self.tracker = build_tracker(cfg, self.out_dir, acc.is_main_process,
+                                     resumed=bool(cfg.train.resume_from))
+        if acc.is_main_process and self.out_dir.is_dir():
+            # A signal file left over from an earlier run would stop this one at its first step.
+            for name in ("save", "save_quit"):
+                (self.out_dir / name).unlink(missing_ok=True)
+        # Baselines, so the first logged eval/sample is the untrained model rather than step N.
+        # Skipped on resume: the resumed run's history already has them.
+        if self.global_step == 0:
+            if self.evaluator is not None and cfg.eval.at_start:
+                self._evaluate()
+            if self.validation_sampler is not None and cfg.sampling.at_start:
+                self.validation_sampler.run(0, "step000000")
 
         if self.progress_mode == "bar":
             self.bar = tqdm(
@@ -824,6 +869,7 @@ class Trainer:
                 # communicating, and a resumed run lands in the right phase on its own.
                 self._set_phase()
                 self._set_rti_budget()
+                self._samples_since_log += len(batch["captions"])
                 with acc.accumulate(self.transformer):
                     loss, hf = self._step(batch)
                     if cfg.optimizer.gradient_release:
@@ -831,7 +877,10 @@ class Trainer:
                     acc.backward(loss)
 
                     if acc.sync_gradients and cfg.optimizer.max_grad_norm > 0:
-                        acc.clip_grad_norm_(trainable, cfg.optimizer.max_grad_norm)
+                        # The pre-clip total norm, kept as a tensor: reading it here would sync
+                        # the GPU every step, and only logged steps need the number.
+                        self._grad_norm = acc.clip_grad_norm_(trainable,
+                                                              cfg.optimizer.max_grad_norm)
 
                     if not cfg.optimizer.gradient_release:
                         self._apply_lr_mul()
@@ -863,15 +912,36 @@ class Trainer:
                     self._log(loss, hf, epoch, t0)
                     t0 = time.time()
 
+                tag = f"step{self.global_step:06d}"
+                saved = False
                 if cfg.train.save_every_steps and self.global_step % cfg.train.save_every_steps == 0:
-                    self.save(f"step{self.global_step:06d}")
+                    self.save(tag)
+                    saved = True
+
+                signal = self._read_signal()
+                if signal:
+                    # `save_quit` always writes optimizer state: stopping a run to continue it
+                    # later is the point, and a checkpoint without state cannot be resumed.
+                    if signal == 2 or not saved:
+                        self.save(tag, full_state=True if signal == 2 else None)
+                    self._clear_signal(signal)
+                    if signal == 2:
+                        _emit(self, f"save_quit signal: saved {tag} and stopping")
+                        done = stopped_by_signal = True
+                        break
+                    _emit(self, f"save signal: saved {tag}")
+
+                if self._periodic(self.global_step, None):
+                    t0 = time.time()
 
                 if self.global_step >= self.total_steps:
                     done = True
                     break
 
-            if cfg.train.save_every_epochs and (epoch + 1) % cfg.train.save_every_epochs == 0:
-                self.save(f"epoch{epoch + 1:03d}")
+            if not stopped_by_signal:
+                if cfg.train.save_every_epochs and (epoch + 1) % cfg.train.save_every_epochs == 0:
+                    self.save(f"epoch{epoch + 1:03d}")
+                self._periodic(self.global_step, epoch + 1)
             if done:
                 break
 
@@ -879,9 +949,103 @@ class Trainer:
             self.bar.close()
             self.bar = None
 
-        if not cfg.train.skip_final_save:
+        if not cfg.train.skip_final_save and not stopped_by_signal:
             self.save("final")
+        self.tracker.finish()
         acc.end_training()
+
+    # ------------------------------------------------------- eval / samples / signals
+
+    def _periodic(self, step: int, epoch_end: int | None) -> bool:
+        """Run eval and validation samples when due. Returns whether anything ran.
+
+        Collective under DDP: every rank reaches the same decision from the same step count, and
+        both eval and sampling share their work across ranks.
+        """
+        ran = False
+        if self.evaluator is not None and self.evaluator.due(step, epoch_end):
+            self._evaluate()
+            ran = True
+        if self.validation_sampler is not None and self.validation_sampler.due(step, epoch_end):
+            tag = f"step{step:06d}" if epoch_end is None else f"epoch{epoch_end:03d}"
+            self.validation_sampler.run(step, tag)
+            ran = True
+        return ran
+
+    def _evaluate(self) -> None:
+        start = time.time()
+        metrics = self.evaluator.run(self, self.global_step)
+        if metrics is None:
+            return
+        metrics["eval/seconds"] = time.time() - start
+        self.tracker.log(metrics, self.global_step)
+        bands = "  ".join(f"q{k.rsplit('q', 1)[-1]} {v:.4f}" for k, v in metrics.items()
+                          if k.startswith("eval/loss_q"))
+        self._print(f"eval     step {self.global_step}  loss {metrics['eval/loss']:.4f}  "
+                    f"({len(self.evaluator)} images, {metrics['eval/seconds']:.1f}s)  {bands}")
+
+    def _print(self, msg: str) -> None:
+        if self.accelerator.is_main_process:
+            _emit(self, msg)
+
+    def _read_signal(self) -> int:
+        """0 = none, 1 = `save`, 2 = `save_quit` -- a file of that name in the run directory.
+
+        The way to checkpoint a run on a remote machine on demand: `touch <run dir>/save`. Rank 0
+        looks; the result is broadcast so every rank takes the same branch (they all have to call
+        `save`, which is collective).
+        """
+        code = 0
+        if self.accelerator.is_main_process:
+            if (self.out_dir / "save_quit").exists():
+                code = 2
+            elif (self.out_dir / "save").exists():
+                code = 1
+        if self.accelerator.num_processes > 1:
+            from accelerate.utils import broadcast
+            code = int(broadcast(torch.tensor([code], device=self.accelerator.device)).item())
+        return code
+
+    def _clear_signal(self, code: int) -> None:
+        if self.accelerator.is_main_process:
+            (self.out_dir / ("save_quit" if code == 2 else "save")).unlink(missing_ok=True)
+
+    def _train_metrics(self, loss: float, hf: float | None, peaks: list, samples: float,
+                       t0: float) -> dict:
+        """Everything the console line shows, as numbers, plus what it has no room for."""
+        elapsed = max(time.time() - t0, 1e-9)
+        lrs = self.scheduler.get_last_lr()
+        stats = getattr(self, "last_stats", {}) or {}
+        m = {
+            "train/loss": loss,
+            "train/lr": lrs[0],
+            "train/epoch": self.global_step / max(1, self.steps_per_epoch),
+            "train/progress": self.global_step / max(1, self.total_steps),
+            "train/seconds_per_step": elapsed / max(1, self.cfg.train.log_every),
+            "train/samples_per_second": samples / elapsed,
+            "train/peak_memory_gb": max(peaks) / 1e9 if peaks else None,
+        }
+        if len(lrs) > 1:
+            for i, (group, lr) in enumerate(zip(self.groups, lrs)):
+                m[f"lr/{group.get('component', f'group{i}')}"] = lr
+        if hf is not None:
+            m["train/mse"] = loss - hf
+            m["train/hf_loss"] = hf
+        if self._grad_norm is not None:
+            m["train/grad_norm"] = float(self._grad_norm)
+        if "self_flow_alignment" in stats:
+            m["train/self_flow_alignment"] = stats["self_flow_alignment"]
+        if "ot_moved" in stats:
+            m["train/ot_moved"] = stats["ot_moved"]
+        if self.last_preserve is not None:
+            m["train/preserve"] = self.last_preserve.item()
+        if self._eta_anchor is not None:
+            t_anchor, s_anchor = self._eta_anchor
+            done = self.global_step - s_anchor
+            if done > 0:
+                m["train/eta_seconds"] = ((time.time() - t_anchor) / done
+                                          * max(0, self.total_steps - self.global_step))
+        return m
 
     def _log(
         self, loss: torch.Tensor, hf: torch.Tensor | None, epoch: int, t0: float
@@ -900,7 +1064,15 @@ class Trainer:
         peaks = acc.gather(
             torch.tensor([local_peak], device=acc.device, dtype=torch.float64)
         ).tolist()
+        # Images actually consumed since the last log line, all ranks: batch size varies by bucket
+        # (and tier), so batch_size x steps would misstate throughput.
+        samples = acc.gather(torch.tensor([float(self._samples_since_log)], device=acc.device,
+                                          dtype=torch.float64)).sum().item()
+        self._samples_since_log = 0
 
+        if acc.is_main_process and self.tracker.enabled:
+            self.tracker.log(self._train_metrics(value, hf_value, peaks, samples, t0),
+                             self.global_step)
         if not acc.is_main_process or self.progress_mode == "off":
             return
         # Every group's LR, not just group 0's. With `[component_lr]` set, printing `get_last_lr()[0]`
@@ -985,10 +1157,17 @@ class Trainer:
             # `entries x num_repeats`, not its file count, and that is the number that decides how
             # hard a regularization set actually pulls.
             total = max(1, len(self.dataset))
-            for sub, n in subsets:
+            # A per-artist manifest has thousands of subsets; list the largest shares and
+            # summarise the rest rather than printing ten thousand lines at every start.
+            shown = subsets if len(subsets) <= 20 else sorted(subsets, key=lambda s: -s[1])[:15]
+            for sub, n in shown:
                 flag = "" if sub.texture else "  [fullres only -- keeps its captions]"
                 print(f"         {Path(sub.path).name:<24} {n:>6} entries  {100 * n / total:4.1f}% "
                       f"of the epoch  x{sub.num_repeats}{flag}")
+            if len(shown) < len(subsets):
+                rest = sorted((n for _, n in subsets), reverse=True)[len(shown):]
+                print(f"         ... {len(rest)} more subsets, {sum(rest)} entries "
+                      f"({100 * sum(rest) / total:.1f}%), {min(rest)}-{max(rest)} each")
         if self.dataset.tier_report is not None:
             summary = self.dataset.tier_report.summary()
             if summary:
@@ -1045,7 +1224,16 @@ class Trainer:
         elif cfg.schedule.kind == "rerex":
             sched += (f", global_d={cfg.schedule.global_d}, local_d={cfg.schedule.local_d}, "
                       f"{cfg.schedule.num_segments} segments, weight_power={cfg.schedule.weight_power}")
+        elif cfg.schedule.kind == "stage":
+            sched = f"stage (StageLR), {len(cfg.schedule.stages)} stage(s) over {self.total_steps} updates"
         print(f"sched    {sched}")
+        from .stage_lr import stage_plan_of
+        plan = stage_plan_of(self.scheduler)
+        if plan is not None:
+            # Exact update ranges, so a schedule fitted to the wrong run length is visible before
+            # step 1 rather than as an LR curve that ends early on the dashboard.
+            for line in plan.describe():
+                print(f"         {line}")
         if self.hf_patch is not None:
             print(f"hf loss  scale {cfg.flow.hf_scale}, exponent {cfg.flow.hf_exponent}, "
                   f"patch {self.hf_patch}")
@@ -1100,13 +1288,15 @@ class Trainer:
         """
         return self.accelerator.unwrap_model(module, keep_torch_compile=False)
 
-    def save(self, tag: str) -> None:
+    def save(self, tag: str, full_state: bool | None = None) -> None:
+        """`full_state` overrides `train.save_optimizer_state` for this one save."""
         acc = self.accelerator
         acc.wait_for_everyone()
+        full = self.cfg.train.save_optimizer_state if full_state is None else full_state
 
         # `save_state` is collective -- every rank must call it -- so it happens before the
         # main-process-only export below, not after.
-        if self.cfg.train.save_optimizer_state:
+        if full:
             self.save_full_state(tag)
 
         if not acc.is_main_process:
@@ -1152,7 +1342,7 @@ class Trainer:
         # `state.json` lives beside the optimizer state, which is the only thing that reads it.
         # A flat single-file checkpoint carries its step in the safetensors metadata instead, so an
         # inference-only export is one file with nothing to keep in sync alongside it.
-        if cfg.train.save_optimizer_state:
+        if full:
             (self.out_dir / f"{stem}-state" / "state.json").write_text(
                 json.dumps({"global_step": self.global_step, "tensors": n,
                             "source_checkpoint": self.source_checkpoint}, indent=2)

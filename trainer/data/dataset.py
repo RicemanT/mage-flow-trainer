@@ -77,12 +77,115 @@ class SubsetConfig:
             )
 
 
+def _check_duplicate_subsets(subsets) -> None:
+    seen = set()
+    for s in subsets:
+        if s.path in seen:
+            raise ValueError(
+                f"dataset.subsets lists {s.path!r} twice; use num_repeats to weight it instead"
+            )
+        seen.add(s.path)
+
+
+_TRUE = {"1", "true", "yes", "y", "on"}
+_FALSE = {"0", "false", "no", "n", "off", ""}
+
+
+def _manifest_bool(value, where: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in _TRUE:
+        return True
+    if text in _FALSE:
+        return False
+    raise ValueError(f"{where}: texture must be true/false, got {value!r}")
+
+
+def load_subsets_file(path: str | Path, root: str | Path | None = None) -> list[SubsetConfig]:
+    """Read a subset manifest: CSV, JSON or TOML.
+
+    * CSV: a header row with `path`, optionally `num_repeats` (or `repeats`) and `texture`. Other
+      columns are ignored, so the Studio's `folders.csv` (site, artist, tag, folder, path, images,
+      planned_images, repeats) reads as-is.
+    * JSON: a list of objects with the same keys (the Studio's `folders.json`), or
+      `{"subsets": [...]}`.
+    * TOML: `[[subsets]]` or diffusion-pipe `[[directory]]` tables (the Studio's `dataset.toml`).
+
+    Rows whose repeats are 0 -- the Studio writes that for a folder emptied by curation -- or whose
+    `images` column is 0 are skipped rather than rejected: they are folders with nothing to train.
+    """
+    import csv
+    import json
+    import tomllib
+
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"dataset.subsets_file not found: {p}")
+    suffix = p.suffix.lower()
+    if suffix == ".csv":
+        with p.open(encoding="utf-8-sig", newline="") as fh:
+            rows = list(csv.DictReader(fh))
+        if rows and "path" not in rows[0]:
+            raise ValueError(f"{p}: CSV needs a `path` column, found {list(rows[0])}")
+    elif suffix == ".json":
+        data = json.loads(p.read_text(encoding="utf-8"))
+        rows = data.get("subsets", data.get("directory")) if isinstance(data, dict) else data
+        if not isinstance(rows, list):
+            raise ValueError(f"{p}: expected a JSON list of folders or {{\"subsets\": [...]}}")
+    elif suffix == ".toml":
+        data = tomllib.loads(p.read_text(encoding="utf-8"))
+        rows = data.get("subsets") or data.get("directory") or data.get("dataset", {}).get("subsets")
+        if not isinstance(rows, list):
+            raise ValueError(f"{p}: expected [[subsets]] or [[directory]] tables")
+    else:
+        raise ValueError(f"{p}: dataset.subsets_file must be .csv, .json or .toml")
+
+    out: list[SubsetConfig] = []
+    for i, row in enumerate(rows):
+        where = f"{p.name} row {i + 1}"
+        if not isinstance(row, dict) or not str(row.get("path") or "").strip():
+            raise ValueError(f"{where}: missing `path`")
+        raw = row.get("num_repeats", row.get("repeats", 1))
+        try:
+            repeats = int(float(raw)) if str(raw).strip() != "" else 1
+            images = row.get("images")
+            empty = images is not None and str(images).strip() != "" and int(float(images)) == 0
+        except ValueError:
+            raise ValueError(f"{where}: repeats/images must be numbers, got {raw!r}") from None
+        if repeats == 0 or empty:
+            continue
+        folder = Path(str(row["path"]).strip())
+        if root:
+            # Manifest written elsewhere: keep the folder name, swap everything above it. Split on
+            # both separators so a Windows-written path re-roots correctly on Linux and vice versa.
+            folder = Path(root) / str(row["path"]).strip().replace("\\", "/").rstrip("/").split("/")[-1]
+        elif not folder.is_absolute():
+            folder = p.parent / folder
+        texture = _manifest_bool(row.get("texture", True), where)
+        out.append(SubsetConfig(path=str(folder), num_repeats=repeats, texture=texture))
+    if not out:
+        raise ValueError(f"{p}: no folders with images listed")
+    return out
+
+
 @dataclass
 class DatasetConfig:
     # Exactly one of `path` / `subsets`. `path` is the single-directory form and stays the default
     # so every existing config is untouched; `subsets` is the multi-source form.
     path: str | None = None
     subsets: list[SubsetConfig] = field(default_factory=list)
+    # Subsets listed in a file instead of `[[dataset.subsets]]` blocks -- for datasets with
+    # thousands of folders (one per artist), where inline tables make the TOML unreadable and the
+    # GUI's subset grid unusable. Accepts Illustration Scrapping Studio's training-layout export
+    # (`folders.csv` / `folders.json` / `dataset.toml`) as written, or any CSV/JSON with a `path`
+    # column and optional `num_repeats` (or `repeats`) and `texture`. Relative paths resolve
+    # against the file's folder. Combines with inline `subsets`; excludes `path`.
+    subsets_file: str | None = None
+    # Re-root every `subsets_file` folder under this directory, keeping only its folder name. For
+    # a manifest written on another machine: `/home/jovyan/lib/images/emily` becomes
+    # `<subsets_root>/emily`.
+    subsets_root: str | None = None
     resolution: int = 1024                 # AREA budget: max_reso = (r, r)
     # Multi-resolution: train every image at every listed area budget. Unset -> [resolution], which
     # is bit-identical to single-tier behaviour. A tier is a repeat with a different resolution, so
@@ -114,6 +217,10 @@ class DatasetConfig:
     # for ordinary training it is strictly worse -- a VAE forward every step, forever, plus the VAE
     # resident in VRAM, to reproduce a tensor that never changes.
     source: str = "auto"  # "images" | "latents" | "encode" | "auto"
+    # Storage precision for latents cached from this config (`cache_latents cache-config`, the
+    # GUI's Cache button). float16 halves the cache on disk; training reads either. Existing
+    # caches keep their precision -- `cache_latents convert` rewrites them in place.
+    latent_dtype: str = "float32"  # "float32" | "float16" | "bfloat16"
 
     # Only read when a curriculum phase has `mode = "texture"`. Nested under [dataset.texture].
     texture: TextureConfig = field(default_factory=TextureConfig)
@@ -122,19 +229,24 @@ class DatasetConfig:
         self.subsets = [
             s if isinstance(s, SubsetConfig) else SubsetConfig(**s) for s in self.subsets
         ]
-        if bool(self.path) == bool(self.subsets):
+        if self.subsets_root and not self.subsets_file:
+            raise ValueError("dataset.subsets_root only applies to dataset.subsets_file")
+        # The manifest is read on first use (`effective_subsets`), like every other dataset path:
+        # a config naming a folder that is not on this machine yet still loads, which is what
+        # lets configs travel between the laptop and the training box. Its rows are also kept off
+        # the dataclass fields -- the config is embedded in every checkpoint's metadata, and ten
+        # thousand expanded rows would be megabytes of it; the file path is recorded instead.
+        self._manifest = None
+        if bool(self.path) == bool(self.subsets or self.subsets_file):
             raise ValueError(
-                "dataset needs exactly one of `path` (single directory) or `subsets` "
-                "(a list of [[dataset.subsets]] tables), not "
+                "dataset needs exactly one of `path` (single directory) or `subsets` / "
+                "`subsets_file` (a list of folders), not "
                 + ("both" if self.path else "neither")
             )
-        seen = {}
-        for s in self.subsets:
-            if s.path in seen:
-                raise ValueError(
-                    f"dataset.subsets lists {s.path!r} twice; use num_repeats to weight it instead"
-                )
-            seen[s.path] = s
+        _check_duplicate_subsets(self.subsets)
+        if self.latent_dtype not in ("float32", "float16", "bfloat16"):
+            raise ValueError(f"dataset.latent_dtype must be float32, float16 or bfloat16, "
+                             f"got {self.latent_dtype!r}")
         if self.tier_collapse not in ("dedup", "repeat"):
             raise ValueError(
                 f"dataset.tier_collapse must be 'dedup' or 'repeat', got {self.tier_collapse!r}"
@@ -161,8 +273,11 @@ class DatasetConfig:
         The single-`path` form is exactly a one-subset dataset carrying the top-level
         `num_repeats`, which is what keeps every existing config byte-identical in behaviour.
         """
-        if self.subsets:
-            return self.subsets
+        if self.subsets_file and self._manifest is None:
+            self._manifest = load_subsets_file(self.subsets_file, self.subsets_root)
+            _check_duplicate_subsets([*self.subsets, *self._manifest])
+        if self.subsets or self._manifest:
+            return [*self.subsets, *(self._manifest or [])]
         return [SubsetConfig(path=self.path, num_repeats=self.num_repeats, texture=True)]
 
     @property

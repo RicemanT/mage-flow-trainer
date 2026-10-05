@@ -97,7 +97,7 @@ class OptimizerConfig:
 
 @dataclass
 class ScheduleConfig:
-    kind: str = "constant"              # "constant" | "cosine" | "linear" | "rex" | "rerex"
+    kind: str = "constant"              # "constant" | "cosine" | "linear" | "rex" | "rerex" | "stage"
     warmup_steps: int = 0
     # Floor for every decaying schedule, as a fraction of the group's peak LR. sd-scripts hardcodes
     # 0.001 for REX/ReREX; leaving this at 0.0 makes them decay all the way to zero instead.
@@ -112,9 +112,29 @@ class ScheduleConfig:
     weight_power: float = 1.5           # step-budget skew toward early segments; 0 == equal lengths
     num_segments: int = 8
 
+    # --- stage (StageLR) ---
+    # Chained segments sized as fractions of the post-warmup run, in StageLR's own table format so
+    # a diffusion-pipe `[StageLR] stages = [...]` list pastes in unchanged:
+    #   { type = "linear",   end_lr = 7e-6,  percent = 0.1 }
+    #   { type = "cosine",   end_lr = 5e-6,  percent = 0.2 }
+    #   { type = "constant", lr = 7e-6,      percent = 0.3 }
+    #   { type = "rex",      max_val = 7e-6, min_val = 0, percent = 0.4 }
+    # The values are absolute learning rates for `optimizer.lr`; groups with a `[component_lr]`
+    # override follow the same curve scaled by their ratio to it. See `trainer/training/stage_lr.py`.
+    stages: list[dict] = field(default_factory=list)
+
     def __post_init__(self):
-        if self.kind not in ("constant", "cosine", "linear", "rex", "rerex"):
+        if self.kind not in ("constant", "cosine", "linear", "rex", "rerex", "stage"):
             raise ValueError(f"unknown schedule.kind: {self.kind!r}")
+        if self.kind == "stage":
+            from .stage_lr import validate_stages
+            self.stages = validate_stages(self.stages)
+        elif self.stages:
+            # Rejected rather than ignored, like every other inert knob here: a stage list under
+            # `kind = "cosine"` reads as a schedule and trains as a different one.
+            raise ValueError(
+                f"schedule.stages is set but schedule.kind is {self.kind!r}; stages only apply to "
+                f"kind = \"stage\". Set the kind, or remove the stages.")
         if not 0.0 <= self.min_lr_ratio < 1.0:
             raise ValueError(f"schedule.min_lr_ratio must be in [0, 1), got {self.min_lr_ratio}")
         # d == 1 makes the REX denominator collapse to the numerator: a flat curve that falls off a
@@ -299,6 +319,181 @@ class SelfFlowConfig:
 
 
 @dataclass
+class TrackingConfig:
+    """`[tracking]`: where metrics and validation samples go besides the console line.
+
+    Credentials are deliberately not config keys: the whole config is embedded in every exported
+    checkpoint's metadata. wandb reads WANDB_API_KEY (or `wandb login`); Trackio Spaces use the
+    Hugging Face login. See `trainer/training/tracking.py`.
+    """
+    # Any of "tensorboard", "wandb", "trackio", together if wanted. Empty = console only.
+    backends: list[str] = field(default_factory=list)
+    project: str = "mage-flow"
+    run_name: str | None = None          # default: train.run_name
+    log_dir: str | None = None           # default: <output_dir>/<run_name>/tracking
+    # On `resume_from`, continue the same wandb run / Trackio run instead of starting a new one.
+    resume_run: bool = True
+    wandb_entity: str | None = None
+    wandb_mode: str = "online"           # "online" | "offline" (sync later with `wandb sync`)
+    wandb_base_url: str | None = None    # self-hosted W&B
+    wandb_tags: list[str] = field(default_factory=list)
+    # A failed online start (network block, expired key) retries offline instead of losing data.
+    wandb_offline_on_failure: bool = True
+    trackio_space_id: str | None = None  # e.g. "user/dashboard" for a Hugging Face Space
+    trackio_server_url: str | None = None
+
+    def __post_init__(self):
+        from .tracking import BACKENDS
+
+        if isinstance(self.backends, str):
+            self.backends = [self.backends]
+        self.backends = [str(b).strip().lower() for b in self.backends if str(b).strip()]
+        unknown = [b for b in self.backends if b not in BACKENDS]
+        if unknown:
+            raise ValueError(f"tracking.backends: unknown backend(s) {unknown}; "
+                             f"choose from {list(BACKENDS)}")
+        if len(set(self.backends)) != len(self.backends):
+            raise ValueError(f"tracking.backends lists a backend twice: {self.backends}")
+        if self.wandb_mode not in ("online", "offline"):
+            raise ValueError(f"tracking.wandb_mode must be 'online' or 'offline', "
+                             f"got {self.wandb_mode!r}")
+        if not str(self.project).strip():
+            raise ValueError("tracking.project must not be empty")
+
+
+# Settings a `[sampling]` prompt can override for itself. Everything else in `[sampling]` is about
+# the run (cadence, output) and is rejected inside a prompt table, so a typo surfaces at load.
+SAMPLE_SETTINGS = ("negative_prompt", "seed", "width", "height", "steps", "cfg", "shift",
+                   "renormalize_cfg")
+
+
+@dataclass
+class SamplingConfig:
+    """`[sampling]`: generate images from fixed prompts during training (validation samples).
+
+    `prompts` entries are strings, or tables overriding any of SAMPLE_SETTINGS plus a `label`:
+        prompts = ["Drawn by emily, 1girl, smile",
+                   { prompt = "a castle at dusk", width = 1216, height = 832, seed = 7 }]
+    Prompt embeddings are computed once, with the text cache, so sampling never needs the text
+    encoder resident. Defaults follow Microsoft's reference pipeline: 30 Euler steps, CFG 5, static
+    shift 6, blank negative.
+    """
+    prompts: list = field(default_factory=list)
+    every_n_steps: int | None = None
+    every_n_epochs: int | None = None
+    at_start: bool = False               # a baseline round before the first optimizer step
+    steps: int = 30
+    cfg: float = 5.0
+    shift: float = 6.0
+    width: int = 1024
+    height: int = 1024
+    negative_prompt: str = " "
+    seed: int = 42
+    # "fixed" reuses each prompt's seed every round, so round-to-round differences come from
+    # training rather than from different noise. "walk" adds the round index.
+    seed_strategy: str = "fixed"
+    renormalize_cfg: bool = False        # rescale the guided velocity to the conditional norm
+    save_to_disk: bool = True            # <output_dir>/<run_name>/samples/<tag>/
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.prompts)
+
+    def __post_init__(self):
+        if isinstance(self.prompts, str):
+            self.prompts = [self.prompts]
+        if self.seed_strategy not in ("fixed", "walk"):
+            raise ValueError(f"sampling.seed_strategy must be 'fixed' or 'walk', "
+                             f"got {self.seed_strategy!r}")
+        for name in ("every_n_steps", "every_n_epochs"):
+            v = getattr(self, name)
+            if v is not None and (type(v) is not int or v < 0):
+                raise ValueError(f"sampling.{name} must be a non-negative integer")
+        self.resolved_prompts()
+        if self.enabled and not (self.every_n_steps or self.every_n_epochs or self.at_start):
+            raise ValueError("[sampling] has prompts but no cadence: set every_n_steps, "
+                             "every_n_epochs or at_start.")
+
+    def resolved_prompts(self) -> list[dict]:
+        """Every prompt with its effective settings, validated."""
+        out = []
+        for i, raw in enumerate(self.prompts):
+            where = f"sampling.prompts[{i}]"
+            entry = {"prompt": raw} if isinstance(raw, str) else raw
+            if not isinstance(entry, dict) or not isinstance(entry.get("prompt"), str):
+                raise ValueError(f"{where} must be a string or a table with a `prompt` string")
+            unknown = sorted(set(entry) - {"prompt", "label", *SAMPLE_SETTINGS})
+            if unknown:
+                raise ValueError(f"{where} has unknown key(s) {unknown}; per-prompt keys are "
+                                 f"prompt, label, {', '.join(SAMPLE_SETTINGS)}")
+            s = {k: entry.get(k, getattr(self, k)) for k in SAMPLE_SETTINGS}
+            for dim in ("width", "height"):
+                if type(s[dim]) is not int or s[dim] < 64 or s[dim] % 16:
+                    raise ValueError(f"{where}: {dim} must be a multiple of 16 and >= 64, "
+                                     f"got {s[dim]!r}")
+            if type(s["steps"]) is not int or s["steps"] < 1:
+                raise ValueError(f"{where}: steps must be an integer >= 1")
+            if type(s["seed"]) is not int:
+                raise ValueError(f"{where}: seed must be an integer")
+            if not isinstance(s["cfg"], (int, float)) or s["cfg"] < 0:
+                raise ValueError(f"{where}: cfg must be >= 0")
+            if not isinstance(s["shift"], (int, float)) or s["shift"] <= 0:
+                raise ValueError(f"{where}: shift must be > 0")
+            if not isinstance(s["negative_prompt"], str):
+                raise ValueError(f"{where}: negative_prompt must be a string")
+            label = entry.get("label") or _prompt_label(entry["prompt"], i)
+            out.append({**s, "prompt": entry["prompt"], "label": label, "index": i})
+        return out
+
+
+def _prompt_label(prompt: str, index: int) -> str:
+    cleaned = "".join(c if c.isalnum() or c in " -_" else "" for c in prompt).split()
+    return "_".join(cleaned)[:40].strip("_") or f"prompt{index}"
+
+
+@dataclass
+class EvalConfig:
+    """`[eval]`: held-out flow-matching loss at fixed timestep quantiles.
+
+    Deterministic by construction -- fixed quantiles, fixed per-sample noise, captions without
+    augmentation -- so the number moves only when the model does. That is what training loss,
+    which re-draws timestep and noise every step, cannot give you. `path` uses the training
+    dataset's resolution and bucket settings and must be latent-cached like any other subset.
+    """
+    path: str | None = None
+    every_n_steps: int | None = None
+    every_n_epochs: int | None = None
+    at_start: bool = True                # baseline before the first step (skipped on resume)
+    quantiles: list[float] = field(
+        default_factory=lambda: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+    batch_size: int = 4
+    max_samples: int | None = None       # cap, taken in a fixed order
+    seed: int = 0
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.path)
+
+    def __post_init__(self):
+        if not self.quantiles or any(not isinstance(q, (int, float)) or not 0 < q < 1
+                                     for q in self.quantiles):
+            raise ValueError("eval.quantiles must be a non-empty list of values in (0, 1)")
+        self.quantiles = [float(q) for q in self.quantiles]
+        if type(self.batch_size) is not int or self.batch_size < 1:
+            raise ValueError("eval.batch_size must be a positive integer")
+        if self.max_samples is not None and (type(self.max_samples) is not int
+                                             or self.max_samples < 1):
+            raise ValueError("eval.max_samples must be a positive integer")
+        for name in ("every_n_steps", "every_n_epochs"):
+            v = getattr(self, name)
+            if v is not None and (type(v) is not int or v < 0):
+                raise ValueError(f"eval.{name} must be a non-negative integer")
+        if self.enabled and not (self.every_n_steps or self.every_n_epochs or self.at_start):
+            raise ValueError("[eval] has a path but no cadence: set every_n_steps, "
+                             "every_n_epochs or at_start.")
+
+
+@dataclass
 class Config:
     train: TrainConfig = field(default_factory=TrainConfig)
     dataset: DatasetConfig = field(default_factory=lambda: DatasetConfig(path=""))
@@ -311,6 +506,9 @@ class Config:
     preserve: PreserveConfig = field(default_factory=PreserveConfig)
     rti: RTIConfig = field(default_factory=RTIConfig)
     self_flow: SelfFlowConfig = field(default_factory=SelfFlowConfig)
+    tracking: TrackingConfig = field(default_factory=TrackingConfig)
+    sampling: SamplingConfig = field(default_factory=SamplingConfig)
+    eval: EvalConfig = field(default_factory=EvalConfig)
     # `[[curriculum]]` -- an array of tables, so it is built by hand in `load_config` rather than
     # through `_SECTIONS`. Empty by default; an empty curriculum is exactly today's behaviour.
     curriculum: Curriculum = field(default_factory=Curriculum)
@@ -334,6 +532,9 @@ _SECTIONS = {
     "preserve": PreserveConfig,
     "rti": RTIConfig,
     "self_flow": SelfFlowConfig,
+    "tracking": TrackingConfig,
+    "sampling": SamplingConfig,
+    "eval": EvalConfig,
 }
 
 
@@ -425,8 +626,9 @@ def load_config(path: str | Path) -> Config:
 
     cfg = Config(**sections)
     validate_model_options(cfg)
-    if not cfg.dataset.path and not cfg.dataset.subsets:
-        raise ValueError("dataset.path (or a [[dataset.subsets]] list) is required")
+    if not cfg.dataset.path and not cfg.dataset.subsets and not cfg.dataset.subsets_file:
+        raise ValueError("dataset.path (or a [[dataset.subsets]] list or dataset.subsets_file) "
+                         "is required")
 
     # A per-tier `batch_size` map must name exactly the tiers that exist. Checked here because it
     # is the one rule that spans two sections, and because getting it wrong is expensive: the old

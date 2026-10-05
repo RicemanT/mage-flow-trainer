@@ -24,7 +24,7 @@ from PySide6 import QtCore, QtWidgets
 from . import bridge
 from ..training.optimizer_specs import OPTIMIZERS, optimizer_defaults, supports
 from .metrics import LiveMetricsWidget
-from .process import (Job, ProcessRunner, audit_launch, cache_launch, concat_launch,
+from .process import (Job, ProcessRunner, audit_launch, cache_config_launch, concat_launch,
                       train_launch, training_env)
 from .schema import LAYOUT, SPEC
 from .widgets import (
@@ -110,7 +110,25 @@ _RULES = {
                       "quantize_state", "offload_state", "gradient_release", "norm_mode",
                       "use_first_moment")},
 
-    "schedule.min_lr_ratio": lambda c: c.get("schedule.kind") != "constant",
+    "schedule.min_lr_ratio": lambda c: c.get("schedule.kind") not in ("constant", "stage"),
+    "schedule.stages": lambda c: c.get("schedule.kind") == "stage",
+    "dataset.subsets_root": lambda c: bool(c.get("dataset.subsets_file")),
+    "dataset.path": lambda c: not (c.get("dataset.subsets") or c.get("dataset.subsets_file")),
+    **{f"dataset.caption.{option}": (lambda c: bool(c.get("dataset.caption.attribution_patterns")))
+       for option in ("attribution_position", "attribution_dropout_immune",
+                      "attribution_dedupe_on_combine")},
+    **{f"tracking.{option}": (lambda c: bool(c.get("tracking.backends"))) for option in (
+        "project", "run_name", "log_dir", "resume_run")},
+    **{f"tracking.{option}": (lambda c: "wandb" in (c.get("tracking.backends") or [])) for option in (
+        "wandb_entity", "wandb_mode", "wandb_base_url", "wandb_tags", "wandb_offline_on_failure")},
+    **{f"tracking.{option}": (lambda c: "trackio" in (c.get("tracking.backends") or []))
+       for option in ("trackio_space_id", "trackio_server_url")},
+    **{f"sampling.{option}": (lambda c: bool(c.get("sampling.prompts"))) for option in (
+        "every_n_steps", "every_n_epochs", "at_start", "steps", "cfg", "shift", "width", "height",
+        "negative_prompt", "seed", "seed_strategy", "renormalize_cfg", "save_to_disk")},
+    **{f"eval.{option}": (lambda c: bool(c.get("eval.path"))) for option in (
+        "every_n_steps", "every_n_epochs", "at_start", "quantiles", "batch_size", "max_samples",
+        "seed")},
     "schedule.d": lambda c: c.get("schedule.kind") == "rex",
     "schedule.global_d": lambda c: c.get("schedule.kind") == "rerex",
     "schedule.local_d": lambda c: c.get("schedule.kind") == "rerex",
@@ -399,6 +417,20 @@ class TrainingGUI(QtWidgets.QWidget):
         self.start_btn = make_btn("Start Training", self._start, style="accent")
         self.start_btn.setFixedWidth(160)
         row.addWidget(self.start_btn)
+        # Ask the running trainer to checkpoint: it watches for these files in its run folder
+        # (`touch <run>/save` does the same from a shell or a notebook on a remote machine).
+        self.save_now_btn = make_btn("Save now", lambda: self._signal("save"))
+        self.save_now_btn.setToolTip(
+            "Write a checkpoint at the next optimizer step and keep training. Uses the run's "
+            "save_optimizer_state setting.")
+        self.save_now_btn.setVisible(False)
+        row.addWidget(self.save_now_btn)
+        self.save_quit_btn = make_btn("Save && stop", lambda: self._signal("save_quit"))
+        self.save_quit_btn.setToolTip(
+            "Write a resumable checkpoint (optimizer state included) at the next optimizer step, "
+            "then end the run cleanly. Resume later with train.resume_from.")
+        self.save_quit_btn.setVisible(False)
+        row.addWidget(self.save_quit_btn)
         self.stop_btn = make_btn("Stop", self._stop, style="danger")
         self.stop_btn.setFixedWidth(100)
         self.stop_btn.setVisible(False)
@@ -665,6 +697,10 @@ class TrainingGUI(QtWidgets.QWidget):
             editor.set_enabled(on)
             for widget in self.rows.get(key, ()):
                 widget.setEnabled(on)
+        # Some editors report an empty value while disabled (the StageLR grid under another
+        # schedule kind), so the config is read again once the rules are applied -- otherwise a
+        # kind change would validate the previous state until the next keystroke.
+        flat = self.collect()
 
         ok, err = bridge.validate(flat)
         running = self.runner is not None and self.runner.isRunning()
@@ -729,6 +765,8 @@ class TrainingGUI(QtWidgets.QWidget):
             prevent_sleep(True)
         self.start_btn.setVisible(False)
         self.stop_btn.setVisible(True)
+        self.save_now_btn.setVisible(training)
+        self.save_quit_btn.setVisible(training)
         self._refresh()
         self.runner.start()
 
@@ -736,6 +774,8 @@ class TrainingGUI(QtWidgets.QWidget):
         prevent_sleep(False)
         self.start_btn.setVisible(True)
         self.stop_btn.setVisible(False)
+        self.save_now_btn.setVisible(False)
+        self.save_quit_btn.setVisible(False)
         self.log(f"Process finished with exit code {code}")
         # `self.runner = None` here would drop the last reference to the QThread *while it is still
         # emitting* `finishedSignal`, and PySide then tears the C++ object down mid-emission: every
@@ -778,14 +818,16 @@ class TrainingGUI(QtWidgets.QWidget):
         if path is None:
             return
         self._load_presets(select=path)
+        self._run_dir = (Path(flat.get("train.output_dir") or "output")
+                         / (flat.get("train.run_name") or "mageflow"))
 
         # Cache first here too. Same reasoning as the pipeline: an uncached folder is silent, and
         # a warm cache makes this a no-op. A cache step that fails cancels the training, because
         # training past it is exactly the silent-wrong-dataset case.
-        jobs = self._cache_jobs(flat) + [Job(train_launch(path, self.num_processes()),
-                                             training=True)]
+        jobs = self._cache_jobs(flat, path) + [Job(train_launch(path, self.num_processes()),
+                                                   training=True)]
         if len(jobs) > 1:
-            self.log(f"Caching {len(jobs) - 1} dataset folder(s), then training.")
+            self.log("Caching every dataset folder, then training.")
         self._queue = jobs[1:]
         self._run(jobs[0].launch, jobs[0].training, jobs[0].on_failure)
 
@@ -833,28 +875,56 @@ class TrainingGUI(QtWidgets.QWidget):
         bridge.write_toml(path, arm)
         return path
 
-    def _cache_jobs(self, flat: dict) -> list[Job]:
-        """A caching step per dataset folder, to run before training.
+    def _signal(self, name: str) -> None:
+        """Drop a `save` / `save_quit` file into the running job's folder. The trainer checks for
+        it after every optimizer step and removes it once handled."""
+        run_dir = getattr(self, "_run_dir", None)
+        if run_dir is None:
+            self.log("No run folder known for this job -- touch <output_dir>/<run_name>/"
+                     f"{name} by hand.")
+            return
+        if not run_dir.is_absolute():
+            run_dir = PROJECT_ROOT / run_dir
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / name).touch()
+        except OSError as exc:
+            self.log(f"Could not write {run_dir / name}: {exc}")
+            return
+        self.log("Save requested -- the trainer saves at the next optimizer step."
+                 if name == "save" else
+                 "Save & stop requested -- the trainer saves a resumable checkpoint at the next "
+                 "optimizer step, then exits.")
+
+    def _cache_config_path(self, flat: dict) -> Path | None:
+        """A file `cache-config` can read for the form as it is now, without saving over the
+        user's own config: written to configs/generated/, which is overwritten freely."""
+        ok, err = bridge.validate(flat)
+        if not ok:
+            self.log(f"CONFIG ERROR: {err}")
+            return None
+        out = CONFIG_DIR / "generated"
+        out.mkdir(parents=True, exist_ok=True)
+        path = out / f"{safe_stem(flat.get('train.run_name')) or 'run'}-cache.toml"
+        bridge.write_toml(path, flat)
+        return path
+
+    def _cache_jobs(self, flat: dict, config_path: Path | None = None) -> list[Job]:
+        """One caching step covering every folder the config trains on, to run before training.
 
         Free when the cache is warm -- `overwrite=False` skips what already exists, so this costs a
         directory scan. Worth doing unconditionally because the failure it prevents is silent: the
         dataset layer reads latents and never images, so an uncached folder does not raise, it just
         contributes nothing. A two-subset config with one folder uncached trains happily on the
         other one and produces a LoRA of the wrong thing.
+
+        One `cache-config` job rather than one `cache` job per folder: it loads the VAE once and
+        covers `subsets_file` and the `[eval]` folder too, which matters at thousands of folders.
         """
-        tiers = flat.get("dataset.resolutions") or [flat.get("dataset.resolution") or 1024]
-        return [Job(cache_launch(
-            pth, flat.get("train.model_path") or "", tiers,
-            vae_path=flat.get("train.vae_path"),
-            flux2_vae=bool(flat.get("train.flux2_vae")),
-            model_family=flat.get("train.model_family") or "auto",
-            min_bucket_reso=flat.get("dataset.min_bucket_reso") or 256,
-            max_bucket_reso=flat.get("dataset.max_bucket_reso") or 1920,
-            bucket_reso_steps=flat.get("dataset.bucket_reso_steps") or 64,
-            upscale=not flat.get("dataset.bucket_no_upscale", True),
-            multires_training=bool(flat.get("dataset.multires_training")),
-            gpus=self.gpu_arg(),
-        )) for pth in self._dataset_paths(flat)]
+        path = config_path or self._cache_config_path(flat)
+        if path is None:
+            return []
+        return [Job(cache_config_launch(path, gpus=self.gpu_arg()))]
 
     def _start_pipeline(self):
         """Cache every dataset folder, train both arms, then concatenate them.
@@ -897,7 +967,7 @@ class TrainingGUI(QtWidgets.QWidget):
         merged = out_dir / f"{base}-merged.safetensors"
         jobs.append(Job(concat_launch(merged, parents)))
 
-        self.log(f"Pipeline: {len(paths)} cache step(s), "
+        self.log(f"Pipeline: caching {len(paths)} folder(s), "
                  f"{len(self.PIPELINE_ARMS)} training arms, then concat -> {merged}")
         self._queue = jobs[1:]
         first = jobs[0]
@@ -941,23 +1011,15 @@ class TrainingGUI(QtWidgets.QWidget):
 
     def _cache(self, dry=False):
         c = self.collect()
-        paths = self._dataset_paths(c)
-        if not paths:
-            self.log("Nothing to cache -- set a Dataset path, or give the subset rows a folder.")
+        if not self._dataset_paths(c) and not c.get("dataset.subsets_file"):
+            self.log("Nothing to cache -- set a Dataset path, subset rows or a subsets file.")
             return
-        tiers = c.get("dataset.resolutions") or [c.get("dataset.resolution") or 1024]
-        self._run_each([cache_launch(
-            p, c.get("train.model_path") or "", tiers,
-            vae_path=c.get("train.vae_path"),
-            flux2_vae=bool(c.get("train.flux2_vae")),
-            model_family=c.get("train.model_family") or "auto",
-            min_bucket_reso=c.get("dataset.min_bucket_reso") or 256,
-            max_bucket_reso=c.get("dataset.max_bucket_reso") or 1920,
-            bucket_reso_steps=c.get("dataset.bucket_reso_steps") or 64,
-            upscale=not c.get("dataset.bucket_no_upscale", True),
-            multires_training=bool(c.get("dataset.multires_training")),
-            dry_run=dry, gpus=self.gpu_arg(),
-        ) for p in paths], "Caching")
+        path = self._cache_config_path(c)
+        if path is None:
+            return
+        self._queue = []
+        self._run(cache_config_launch(path, gpus=self.gpu_arg(), dry_run=dry),
+                  training=False, on_failure="continue")
 
     def _audit(self):
         c = self.collect()
