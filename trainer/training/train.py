@@ -260,9 +260,45 @@ class Trainer:
 
     # ---------------------------------------------------------------- data
 
+    def _shared_dataset(self, build):
+        """Run `build()` on rank 0 only and hand every rank a copy.
+
+        Scanning reads every image header (or cache header), caption and cache stat. Done on all
+        ranks, an 8-GPU job on a 600k-image dataset does that 8 times over against the same disk,
+        usually a network volume. Rank 0 scans; the others receive the pickled result.
+
+        The payload is pickled bytes, or the error text if the scan failed: an exception raised on
+        rank 0 alone would leave the other ranks waiting in the broadcast until the hour-long
+        process-group timeout, so the failure is sent and raised everywhere instead.
+        """
+        acc = self.accelerator
+        if acc.num_processes == 1:
+            return build()
+        import pickle
+        from accelerate.utils import broadcast_object_list
+
+        box = [None]
+        if acc.is_main_process:
+            start = time.time()
+            try:
+                box = [("ok", pickle.dumps(build(), protocol=pickle.HIGHEST_PROTOCOL),
+                        time.time() - start)]
+            except Exception as exc:
+                import traceback
+                box = [("error", f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}", 0.0)]
+        broadcast_object_list(box)
+        status, payload, seconds = box[0]
+        if status == "error":
+            raise RuntimeError(f"dataset scan failed on rank 0:\n{payload}")
+        if acc.is_main_process:
+            print(f"dataset  scanned once on rank 0 in {seconds:.1f}s, shared with "
+                  f"{acc.num_processes - 1} other rank(s) ({len(payload) / 1e6:.0f} MB)", flush=True)
+        return pickle.loads(payload)
+
     def _build_data(self) -> None:
         cfg = self.cfg
-        self.dataset = MageFlowDataset(cfg.dataset, caption_seed=cfg.train.seed)
+        self.dataset = self._shared_dataset(
+            lambda: MageFlowDataset(cfg.dataset, caption_seed=cfg.train.seed))
         from ..data.packed import NativeResolutionBatchSampler, collate_native
         sampler_cls = NativeResolutionBatchSampler if cfg.train.pack_resolutions else BucketBatchSampler
         self.sampler = sampler_cls(
@@ -315,7 +351,7 @@ class Trainer:
         self.evaluator = None
         if cfg.eval.enabled:
             from .evaluation import Evaluator
-            self.evaluator = Evaluator(cfg)
+            self.evaluator = self._shared_dataset(lambda: Evaluator(cfg))
         # Not `self.sampler`: that is the batch sampler.
         self.validation_sampler = None
         if cfg.sampling.enabled:

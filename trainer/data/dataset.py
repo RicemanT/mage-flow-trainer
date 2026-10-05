@@ -77,6 +77,19 @@ class SubsetConfig:
             )
 
 
+def _scan_workers(n_subsets: int) -> int:
+    """Threads for scanning subsets: 1 (the original sequential scan) for a handful of folders,
+    up to 16 for per-artist datasets. MAGEFLOW_SCAN_WORKERS overrides; 1 disables threading."""
+    import os
+
+    override = os.environ.get("MAGEFLOW_SCAN_WORKERS")
+    if override:
+        return max(1, int(override))
+    if n_subsets < 8:
+        return 1
+    return max(1, min(16, n_subsets, (os.cpu_count() or 4) * 2))
+
+
 def _check_duplicate_subsets(subsets) -> None:
     seen = set()
     for s in subsets:
@@ -392,7 +405,14 @@ class MageFlowDataset(Dataset):
 
     def _scan(self) -> None:
         subsets = self.config.effective_subsets()
-        resolved = [(s, self._resolve_source(Path(s.path))) for s in subsets]
+        workers = _scan_workers(len(subsets))
+        if workers > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(workers) as pool:
+                modes = list(pool.map(lambda s: self._resolve_source(Path(s.path)), subsets))
+            resolved = list(zip(subsets, modes))
+        else:
+            resolved = [(s, self._resolve_source(Path(s.path))) for s in subsets]
 
         # `auto` is resolved per directory, so two subsets can legitimately disagree -- but a batch
         # carries either `pixels` or `latents`, never both (`collate` picks one key), so a mixed
@@ -415,11 +435,24 @@ class MageFlowDataset(Dataset):
 
         reports: list[TierReport] = []
         self.subset_report: list[tuple[SubsetConfig, int]] = []
-        for sub, mode in resolved:
+        scanned = None
+        if workers > 1:
+            # Thousands of small per-artist folders are I/O-bound to scan (directory listings,
+            # image headers, cache stats), so threads overlap the waits. Results are merged in
+            # subset order below, so the entry list -- and with it every batch -- is identical to
+            # a sequential scan.
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(workers) as pool:
+                scanned = list(pool.map(lambda sm: self._scan_isolated(Path(sm[0].path), sm[1]),
+                                        resolved))
+        for i, (sub, mode) in enumerate(resolved):
             root = Path(sub.path)
             start = len(self.entries)
             self.tier_report = None   # so a subset's report can never be counted twice
-            if mode == "latents":
+            if scanned is not None:
+                self.entries.extend(scanned[i][0])
+                self.tier_report = scanned[i][1]
+            elif mode == "latents":
                 self._scan_latents(root)
             else:
                 self._scan_images(root)
@@ -437,6 +470,22 @@ class MageFlowDataset(Dataset):
 
         verify_max_resolution({e.bucket for e in self.entries})
         self.tier_report = _merge_tier_reports(reports)
+
+    def _scan_isolated(self, root: Path, mode: str):
+        """One subset's (entries, tier report), scanned on a private shallow copy so threads do
+        not share `entries`/`tier_report` -- or the bucket managers, whose `select_bucket` records
+        new resolutions as it goes."""
+        import copy
+
+        worker = copy.copy(self)
+        worker.entries = []
+        worker.tier_report = None
+        worker.bucket_managers = copy.deepcopy(self.bucket_managers)
+        if mode == "latents":
+            worker._scan_latents(root)
+        else:
+            worker._scan_images(root)
+        return worker.entries, worker.tier_report
 
     def _resolve_source(self, root: Path) -> str:
         if not root.exists():
