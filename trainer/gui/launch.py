@@ -61,7 +61,11 @@ def train_launch(config_path: str | Path, num_processes: int = 1, gpus: str = ""
     while the module is importable by construction if accelerate is installed at all. Verified to
     give identical results to the console script (MULTI_GPU, correct ranks and devices).
     """
+    # `--multi_gpu` explicitly: with a saved Accelerate config that says distributed_type NO (left by
+    # `accelerate config` or another tool on a shared box), `--num_processes N` alone is ignored and ONE
+    # process trains while the other GPUs idle. Seen on a JupyterHub server.
     argv = [_python(), "-u", "-m", "accelerate.commands.launch",
+            *(["--multi_gpu"] if num_processes > 1 else []),
             "--num_processes", str(num_processes),
             "-m", "trainer.training.train", str(config_path)]
     label = f"train ({num_processes} GPU{'s, DDP' if num_processes > 1 else ''})"
