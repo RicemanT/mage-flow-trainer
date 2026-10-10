@@ -234,6 +234,16 @@ subsets_root = "/workspace/library/images"   # optional: re-root paths written o
 - A folder whose images were deleted after caching counts as "nothing to do", not an error.
 - Fixed: the planned cache size printed by `cache` was half the real float32 size.
 
+## Caption cache built ahead of time
+
+`python -m trainer.training.train <config> --text-cache-only` builds the persistent caption cache
+(`train.caption_cache_path`, needs `cache_text_embeddings = true` and `caption_variations > 0`) and exits before the
+transformer loads, so a smaller GPU can prepare it. Under `accelerate launch --num_processes N` the captions are
+split across the processes as in a training start. Entries are keyed by each image's folder **name** and file stem
+(not the absolute folder path), so the database stays valid when the dataset is downloaded somewhere else.
+Caches written before this change (`caption-slots-v1`) plan their slots again once; embeddings of captions that
+come out the same are reused.
+
 ## Startup at scale
 
 - **Rank 0 scans, the others receive.** Every rank used to scan the whole dataset: an 8-GPU job read about 600k image (or cache) headers, captions and cache files eight times over the same volume. Now rank 0 scans and broadcasts the result. If the scan fails, the error is raised on every rank instead of leaving the others waiting until the one-hour process-group timeout.

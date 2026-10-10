@@ -180,6 +180,37 @@ batch_size = 2
         acc.Reload()
         return {e.step: e.value for e in acc.Scalars(tag)}
 
+    def test_text_cache_only_builds_the_cache_without_the_transformer(self):
+        from trainer.training import train as train_mod
+        from trainer.training.config import load_config
+
+        cache = self.root / "prep" / "captions.sqlite"
+        path = self.write_config(f'caption_variations = 2\ncaption_cache_path = "{cache.as_posix()}"')
+        loads = []
+
+        def load(path_, *a, **kw):
+            loads.append(kw.get("load_transformer", True))
+            return type("C", (), {"text_encoder": torch.nn.Identity(), "tokenizer": None})()
+
+        with patch.object(train_mod, "load_components", side_effect=load), \
+                patch.object(train_mod, "encode_prompts", side_effect=fake_encode_prompts):
+            train_mod.Trainer(load_config(path), config_path=path, text_cache_only=True)
+        self.assertTrue(cache.is_file())
+        self.assertEqual(loads, [False])          # the text encoder only
+
+        # The same dataset under another absolute path (downloaded elsewhere) reuses every slot.
+        import shutil
+        shutil.copytree(self.root / "data", self.root / "elsewhere" / "data")
+        text = path.read_text(encoding="utf-8").replace(f'path = "{self.root.as_posix()}/data"',
+                                                        f'path = "{self.root.as_posix()}/elsewhere/data"')
+        moved = self.root / "moved.toml"
+        moved.write_text(text, encoding="utf-8")
+        loads.clear()
+        with patch.object(train_mod, "load_components", side_effect=load), \
+                patch.object(train_mod, "encode_prompts", side_effect=fake_encode_prompts):
+            train_mod.Trainer(load_config(moved), config_path=moved, text_cache_only=True)
+        self.assertEqual(loads, [])               # nothing left to encode: the encoder never loads
+
     def test_full_run_then_signal_stop_and_resume(self):
         from trainer.training.stage_lr import StagePlan
 

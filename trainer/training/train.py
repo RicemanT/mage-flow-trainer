@@ -128,7 +128,9 @@ def _text_cache_batches(items, size):
 
 
 class Trainer:
-    def __init__(self, cfg: Config, config_path: str | Path | None = None):
+    def __init__(self, cfg: Config, config_path: str | Path | None = None, text_cache_only: bool = False):
+        """`text_cache_only`: build the persistent caption cache (SQLite) and stop before the transformer
+        loads, so a smaller machine can prepare it for the training machine."""
         from .config import validate_model_options
         validate_model_options(cfg)
         require_cuda()
@@ -234,6 +236,14 @@ class Trainer:
         self._samples_since_log = 0
         self._grad_norm = None
         self._build_data()
+        if text_cache_only:
+            if not (cfg.train.cache_text_embeddings and cfg.train.caption_variations):
+                raise ValueError("--text-cache-only builds the SQLite caption cache: it needs "
+                                 "train.cache_text_embeddings = true and train.caption_variations > 0")
+            device = self.accelerator.device
+            with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
+                self._build_text_cache()
+            return
         self._build_model()
         self._build_optimizer()
         self._prepare()
@@ -1518,6 +1528,8 @@ def main() -> None:
                     help="build everything and run one step, then exit")
     ap.add_argument("--max-steps", type=int, default=None, help="override train.max_steps")
     ap.add_argument("--no-save", action="store_true", help="benchmark without writing checkpoints")
+    ap.add_argument("--text-cache-only", action="store_true",
+                    help="build the caption cache (train.caption_cache_path) and exit; no transformer is loaded")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
@@ -1531,6 +1543,10 @@ def main() -> None:
         cfg.train.save_every_steps = None
         cfg.train.skip_final_save = True
 
+    if args.text_cache_only:
+        Trainer(cfg, config_path=args.config, text_cache_only=True)
+        print("caption cache ready; training was not started", flush=True)
+        return
     Trainer(cfg, config_path=args.config).train()
 
 

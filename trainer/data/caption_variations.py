@@ -165,8 +165,10 @@ class CaptionVariationCache:
 
             parsed = parse_cache_filename(entry.path)
             stem = parsed[0] if parsed else entry.path.stem
-            identity = (str(entry.path.parent.resolve()), stem, entry.tags, entry.nl)
-            pool = digest((identity, caption_identity(aug), seed, "caption-slots-v1"))
+            # The folder's name, not its absolute path: a cache built where the images live (e.g. a
+            # cheap caching box) stays valid on the training machine that downloads it elsewhere.
+            identity = (entry.path.parent.name, stem, entry.tags, entry.nl)
+            pool = digest((identity, caption_identity(aug), seed, "caption-slots-v2"))
             ordinal = occurrence.get(pool, 0)
             occurrence[pool] = ordinal + 1
             self.indices.append((pool, ordinal))
