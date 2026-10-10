@@ -81,7 +81,7 @@ training machine needs no images at all:
    (`folders.csv`, `subsets.toml`, `mageflow-512.toml`, `mageflow-1024.toml`) becomes the root of a private
    Hugging Face dataset, with every `<group>/<artist>` folder it lists beside it. `folders.csv` lists those folders
    relative to itself, so it works wherever the dataset is downloaded.
-2. **Models.** The text encoder, tokenizer and Mage-VAE from the Mage-Flow repository, and the transformer you
+2. **Models.** The text encoder, tokenizer and Mage-VAE from `mage-flow-community/Mage-Flow`, and the transformer you
    finetune as a single file (`train.transformer_path`).
 3. **Data.** The images on the machine that caches, or only the latent cache on the machine that trains.
 4. **Write the configs.** Fills the exported configs' `@MODEL_PATH@`, `@TRANSFORMER_PATH@`, `@DATA_DIR@` and
