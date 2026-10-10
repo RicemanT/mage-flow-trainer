@@ -80,25 +80,28 @@ still running and replays its log, graphs included.
 
 ## Data, models and the latent cache through Hugging Face
 
-[notebooks/mageflow-remote.ipynb](../notebooks/mageflow-remote.ipynb) has a cell for each step, so a fresh
-training machine needs no images at all:
+[notebooks/mageflow-remote.ipynb](../notebooks/mageflow-remote.ipynb) has a cell for each step. The images never
+leave the machine that holds them; the training machine gets only the latent cache:
 
-1. **Upload the dataset** (on the Illustration Scrapping Studio server). The Studio's training-layout export
-   (`folders.csv`, `subsets.toml`, `mageflow-512.toml`, `mageflow-1024.toml`) becomes the root of a private
-   Hugging Face dataset, with every `<group>/<artist>` folder it lists beside it. `folders.csv` lists those folders
-   relative to itself, so it works wherever the dataset is downloaded.
+1. **Prepare the dataset** (on the Illustration Scrapping Studio server). The Studio's training-layout export
+   (`folders.csv`, `subsets.toml`, `mageflow-512.toml`, `mageflow-1024.toml`) becomes the root of a local dataset
+   folder, and every `<group>/<artist>` folder it lists is hard-linked into it from the library (no copy; the
+   latents written beside them stay out of the library). `folders.csv` lists those folders relative to itself, so
+   it works wherever the dataset ends up.
 2. **Models.** The text encoder, tokenizer and Mage-VAE from `mage-flow-community/Mage-Flow`, and the transformer you
    finetune as a single file (`train.transformer_path`).
-3. **Data.** The images on the machine that caches, or only the latent cache on the machine that trains.
+3. **Download the latent cache** on the training machine (no images).
 4. **Write the configs.** Fills the exported configs' `@MODEL_PATH@`, `@TRANSFORMER_PATH@`, `@DATA_DIR@` and
    `@OUTPUT_DIR@` with that machine's paths, into `configs/magetrail/`.
-5. **Cache** where GPU time is cheap: latents for each stage with `cache-config`, and the caption embeddings with
-   `trainer.training.train <config> --text-cache-only`, which builds `train.caption_cache_path` and exits without
-   loading the transformer.
+5. **Cache** on the server, where GPU time is cheap: latents for each stage with `cache-config`, and the caption
+   embeddings with `trainer.training.train <config> --text-cache-only`, which builds `train.caption_cache_path` and
+   exits without loading the transformer.
 6. **Upload the latent cache**: latents, `.txt`/`_nl.txt` captions, the caption cache and the layout files, never
-   the images, to a second private dataset.
+   the images, to a private dataset.
 7. **Train** on the expensive machine from that cache alone (`dataset.source = "auto"` reads the latents when a
    folder has no images).
+8. **Publish the dataset** (optional): the images with their tags, captions and artist metadata as WebDataset tar
+   shards of about 1 GB, which Hugging Face streams natively, plus a dataset card.
 
 The caption cache is portable: its entries are keyed by each folder's name, not its absolute path, so a cache built
 under `/home/jovyan/...` is used as it is under `/workspace/...`.
