@@ -53,6 +53,12 @@ Mage-Flow remote server ready -- paste this link into the GUI's Remote bar and p
 
 ## 2. In the GUI
 
+On a laptop that only runs the GUI, install it without CUDA: `install.bat --gui-only` (Windows) or
+`./install.sh --gui-only` (Linux). That is CPU PyTorch plus the GUI's few packages, pinned like
+`requirements.txt` (`requirements-gui.txt`): about 1 GB instead of the full CUDA stack. Then `start-gui.bat` /
+`./start-gui.sh`. The GUI imports the trainer's config classes to edit and check configs, which is why PyTorch is
+still needed; it never loads a model.
+
 1. Paste the link into the **Remote** bar at the bottom and press **Connect**. A new quick-tunnel
    hostname takes a few seconds to become reachable, and Connect retries for about 30 seconds.
 2. The bar shows the pod's hostname and mode. Local GPU checkboxes are replaced by **Remote GPUs**:
