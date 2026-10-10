@@ -88,7 +88,8 @@ leave the machine that holds them; the training machine gets only the latent cac
    folder, and every `<group>/<artist>` folder it lists is hard-linked into it from the library (no copy; the
    latents written beside them stay out of the library). `folders.csv` lists those folders relative to itself, so
    it works wherever the dataset ends up.
-2. **Models.** The text encoder, tokenizer and Mage-VAE from `mage-flow-community/Mage-Flow`, and the transformer you
+2. **Models.** The text encoder and tokenizer from `mage-flow-community/Mage-Flow`, the FLUX.2 VAE (diffusers format;
+   the configs set `flux2_vae = true`), and the transformer you
    finetune as a single file (`train.transformer_path`).
 3. **Download the latent cache** on the training machine (no images).
 4. **Write the configs.** Fills the exported configs' `@MODEL_PATH@`, `@TRANSFORMER_PATH@`, `@DATA_DIR@` and
