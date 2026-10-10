@@ -97,8 +97,10 @@ leave the machine that holds them; the training machine gets only the latent cac
 5. **Cache** on the server, where GPU time is cheap: latents for each stage with `cache-config`, and the caption
    embeddings with `trainer.training.train <config> --text-cache-only`, which builds `train.caption_cache_path` and
    exits without loading the transformer.
-6. **Upload the latent cache**: latents, `.txt`/`_nl.txt` captions, the caption cache and the layout files, never
-   the images, to a private dataset.
+6. **Upload the latent cache**: latents, `.txt`/`_nl.txt` captions and the layout files, never the images, to a
+   private dataset. Not the caption-embedding cache: it stores whole Qwen3-VL hidden states, about 80 GB for a
+   6,500-image dataset at 8 variations (terabytes at 360k images), so the training machine builds its own at
+   startup, which takes minutes on large GPUs.
 7. **Train** on the expensive machine from that cache alone (`dataset.source = "auto"` reads the latents when a
    folder has no images).
 8. **Publish the dataset** (optional): the images with their tags, captions and artist metadata as WebDataset tar
