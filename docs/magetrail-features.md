@@ -100,6 +100,18 @@ attribution_dedupe_on_combine = true
 Also fixed here: shuffling NL sentences no longer produces `..` when the final sentence (the only
 one carrying its own period) lands in the middle.
 
+## Protected tags file
+
+`[dataset.caption] protected_tags_file` is a real setting now (upstream popped it before the GUI
+could see it, so loading and saving a config in the GUI lost it). One tag per line, `#` comments;
+its tags are added to the inline `protected_tags` list. Illustration Scrapping Studio's training
+export writes `protected_tags.txt` with every character and copyright tag in the exported folders.
+
+- The GUI shows it as a file field and does not require the file to exist on the machine running
+  the GUI: it is usually a path on the pod.
+- The path is not part of the caption cache key; the tags it holds are, so editing the file builds
+  new caption slots.
+
 ## Experiment tracking
 
 ```toml

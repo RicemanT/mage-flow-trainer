@@ -253,6 +253,9 @@ def validate(flat: dict) -> tuple[bool, str]:
     the file distinguishes "explicitly set" from "left at the default". Validating the object would
     silently skip them.
     """
+    # The protected tags file usually lives on the machine that trains (a pod, or an @DATA_DIR@
+    # placeholder the notebook fills), so the GUI does not require it to exist here.
+    flat = {k: v for k, v in flat.items() if k != "dataset.caption.protected_tags_file"}
     text = dump_toml(flat)
     with tempfile.NamedTemporaryFile("w", suffix=".toml", delete=False) as fh:
         fh.write(text)

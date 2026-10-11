@@ -11,7 +11,7 @@ import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
-from ..data.caption import CaptionConfig, load_protected_tags
+from ..data.caption import CaptionConfig
 from ..data.dataset import DatasetConfig, SubsetConfig
 from ..data.texture import TextureConfig
 from .curriculum import Curriculum, Phase
@@ -612,12 +612,10 @@ def load_config(path: str | Path) -> Config:
             if "subsets" in data:
                 data["subsets"] = [_build(SubsetConfig, dict(s), "dataset.subsets")
                                    for s in data["subsets"]]
-            protected_file = caption.pop("protected_tags_file", None)
             cfg = _build(DatasetConfig, data, "dataset")
             cfg.caption = _build(CaptionConfig, caption, "dataset.caption")
             cfg.texture = _build(TextureConfig, texture, "dataset.texture")
-            if protected_file:
-                cfg.caption.protected_tags = load_protected_tags(protected_file)
+            cfg.caption.load_protected_file()   # adds to an inline `protected_tags` list
             sections[f.name] = cfg
         else:
             if f.name == "flow" and data.get("flux_shift") and "shift" not in data:

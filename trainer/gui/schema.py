@@ -455,6 +455,12 @@ SPEC: dict[str, Spec] = {
         "Protected tags",
         "Never dropped, never shuffled out of position. Comma separated. Verified 3000/3000.",
         lambda: F.StrListEditor("trigger, character name, ...", as_set=True, height=60)),
+    "dataset.caption.protected_tags_file": _spec(
+        "Protected tags file",
+        "One tag per line, added to the list above: for example every character and copyright tag of the "
+        "dataset (Illustration Scrapping Studio's training export writes protected_tags.txt). A path on the "
+        "machine that trains.",
+        lambda: F.PathEditor("file")),
     "dataset.caption.caption_dropout_percent": _spec(
         "Caption dropout",
         "Fraction of samples trained with an empty caption -- classifier-free guidance "
@@ -861,6 +867,7 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
             "dataset.caption.shuffle_tags", "dataset.caption.shuffle_keep_first_n",
             "dataset.caption.tag_dropout_percent", "dataset.caption.min_tags_kept",
             "dataset.caption.caption_dropout_percent", "dataset.caption.protected_tags",
+            "dataset.caption.protected_tags_file",
             "dataset.caption.nl_shuffle_sentences", "dataset.caption.nl_keep_first_sentence",
         ]),
         ("Artist Attribution", [

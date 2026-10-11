@@ -46,6 +46,10 @@ class CaptionConfig:
     tag_dropout_percent: float = 0.0  # fraction of tags dropped per sample
     min_tags_kept: int = 3            # never drop below this many
     protected_tags: set[str] = field(default_factory=set)
+    # One tag per line (`#` comments), added to `protected_tags`: e.g. every character and copyright
+    # tag of a dataset, as Illustration Scrapping Studio's training export writes it. The path is not
+    # part of the caption cache key (it differs between machines); the tags it holds are.
+    protected_tags_file: str | None = None
 
     caption_dropout_percent: float = 0.0  # fraction of samples trained unconditional
 
@@ -94,13 +98,15 @@ class CaptionConfig:
     def attribution_enabled(self) -> bool:
         return bool(self.attribution_patterns)
 
+    def load_protected_file(self) -> None:
+        """Add the tags of `protected_tags_file` to `protected_tags` (case-insensitive)."""
+        if self.protected_tags_file:
+            self.protected_tags = {t.lower() for t in self.protected_tags} | load_protected_tags(self.protected_tags_file)
+
     @classmethod
     def from_dict(cls, d: dict) -> CaptionConfig:
-        d = dict(d)
-        path = d.pop("protected_tags_file", None)
-        cfg = cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
-        if path:
-            cfg.protected_tags = load_protected_tags(path)
+        cfg = cls(**{k: v for k, v in dict(d).items() if k in cls.__dataclass_fields__})
+        cfg.load_protected_file()
         return cfg
 
 
@@ -130,6 +136,7 @@ def caption_identity(cfg: CaptionConfig) -> dict:
     valid. With patterns set, all four are part of the identity.
     """
     data = asdict(cfg)
+    data.pop("protected_tags_file", None)   # a machine-specific path; the loaded tags are in `protected_tags`
     if not cfg.attribution_enabled:
         for key in _ATTRIBUTION_DEFAULTS:
             data.pop(key, None)
