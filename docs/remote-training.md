@@ -103,8 +103,9 @@ leave the machine that holds them; the training machine gets only the latent cac
    6,500-image dataset at 8 variations (terabytes at 360k images), so the training machine builds its own at
    startup, which takes minutes on large GPUs.
 7. **Train** on the expensive machine from that cache alone (`dataset.source = "auto"` reads the latents when a
-   folder has no images). Cell 7C uploads the checkpoint `.safetensors` files to `OUTPUT_REPO/OUTPUT_FOLDER/`
-   (files still being written skipped); run it before the pod is deleted.
+   folder has no images). Cell 7C uploads the checkpoint `.safetensors` files to `RicemanT/MageTrail` `V0.4/`
+   (set in the cell; files still being written skipped). It stands alone, so it can run in a second notebook during
+   training; run it before the pod is deleted.
 8. **Publish the dataset** (optional): the images with their tags, captions and artist metadata as WebDataset tar
    shards of about 1 GB, which Hugging Face streams natively, plus a dataset card.
 
