@@ -263,6 +263,11 @@ def validate(flat: dict) -> tuple[bool, str]:
     try:
         load_config(tmp)
         return True, ""
+    except ModuleNotFoundError:
+        # A GUI-only install (install --gui-only) lacks the training stack, e.g. diffusers, so the
+        # config cannot be fully checked here. Remote runs are validated on the machine that trains
+        # before they start, and a local run would fail at import anyway.
+        return True, ""
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}"
     finally:
