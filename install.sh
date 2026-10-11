@@ -10,6 +10,9 @@
 
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
+# Some pod images (Lium's PyTorch template) pin their own torch for every pip through PIP_CONSTRAINT; the
+# trainer's venv has its own pins, which that constraint would contradict.
+unset PIP_CONSTRAINT
 
 VENV="venv"
 # The diffusers commit this trainer was verified against. SDNQ integration is pinned to this revision, so
