@@ -313,6 +313,22 @@ wheels = [
 ]
 
 [[package]]
+name = "lpips"
+version = "0.1.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "scipy" },
+    { name = "torch" },
+    { name = "torchvision" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e8/2d/4b8148d32f5bd461eb7d5daa54fcc998f86eaa709a57f4ef6aa4c62f024f/lpips-0.1.4.tar.gz", hash = "sha256:3846331df6c69688aec3d300a5eeef6c529435bc8460bd58201c3d62e56188fa", size = 18029, upload-time = "2021-08-25T22:10:32.803Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9b/13/1df50c7925d9d2746702719f40e864f51ed66f307b20ad32392f1ad2bb87/lpips-0.1.4-py3-none-any.whl", hash = "sha256:fd537af5828b69d2e6ffc0a397bd506dbc28ca183543617690844c08e102ec5e", size = 53763, upload-time = "2021-08-25T22:10:31.257Z" },
+]
+
+[[package]]
 name = "lycoris-lora"
 version = "4.0.0"
 source = { git = "https://github.com/KohakuBlueleaf/LyCORIS?rev=4a6a333819356795d22170fe661a84f16b299b6b#4a6a333819356795d22170fe661a84f16b299b6b" }
@@ -361,6 +377,9 @@ gui = [
 ot = [
     { name = "scipy" },
 ]
+perceptual = [
+    { name = "lpips" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -369,6 +388,7 @@ requires-dist = [
     { name = "einops" },
     { name = "filelock" },
     { name = "loguru" },
+    { name = "lpips", marker = "extra == 'perceptual'", specifier = "==0.1.4" },
     { name = "lycoris-lora", git = "https://github.com/KohakuBlueleaf/LyCORIS?rev=4a6a333819356795d22170fe661a84f16b299b6b" },
     { name = "numpy" },
     { name = "openvino", specifier = ">=2026.3.0" },
@@ -389,7 +409,7 @@ requires-dist = [
     { name = "triton", marker = "sys_platform != 'win32'" },
     { name = "triton-windows", marker = "sys_platform == 'win32'", specifier = ">=3.6,<3.7" },
 ]
-provides-extras = ["ot", "gui"]
+provides-extras = ["perceptual", "ot", "gui"]
 
 [[package]]
 name = "markdown-it-py"

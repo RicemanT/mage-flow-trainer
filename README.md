@@ -10,6 +10,11 @@ Train Mage-Flow adapters or finetune the full transformer through the GUI or CLI
 - **Adapter choices:** PEFT LoRA and LyCORIS LoCon, LoKr (including configurable factor), and DoRA. LyCORIS supports compilation; LoCon/LoKr default to bypass, and DoRA uses weight decomposition on output.
 - **Practical controls:** GUI configuration, gradient checkpointing, `torch.compile`, single-GPU or distributed training, adapter export, and resumable caches.
 
+Experimental decoded-loss tools include [LPIPS](docs/decoded-perceptual-loss.md)
+and an [eye-local adversarial loss](docs/eye-adversarial-loss.md), through a frozen
+FLUX.2/VSF3 decoder. These are research options, not established eye-quality fixes;
+the tested LPIPS variants did not improve the Houki portrait comparisons.
+
 ## SDNQ and consumer hardware
 
 Training-mode INT8/UINT8 uses a compatibility fix for small-update preservation
@@ -244,6 +249,7 @@ See the [test and dtype audit](docs/bisque-finetune-smoke.md) and [full-finetuni
 
 - [Training and configuration guide](docs/training-guide.md)
 - [Caption variation cache](docs/caption-variation-cache.md)
+- [SNR-gated HF and paired texture losses](docs/detail-losses.md)
 - [Reproducible benchmark preset](configs/mageflow-readme-benchmark.toml)
 - [Benchmark methodology and detailed results](docs/readme-vram-benchmark.md)
 

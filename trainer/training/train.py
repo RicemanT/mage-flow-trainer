@@ -231,6 +231,31 @@ class Trainer:
         self._build_model()
         self._build_optimizer()
         self._prepare()
+        self.paired_texture = None
+        if cfg.paired_texture.scale:
+            from .paired_texture import PairedTextureLoss
+            self.paired_texture = PairedTextureLoss(cfg.paired_texture)
+        self.perceptual = None
+        if cfg.perceptual.enabled:
+            from .perceptual import DecodedPerceptualLoss
+            self.perceptual = DecodedPerceptualLoss(cfg.train, cfg.perceptual, self.accelerator.device)
+            if self.perceptual.eye_regions is not None:
+                covered = sum(str(e.latent_path.resolve()) in self.perceptual.eye_regions
+                              for e in self.dataset.entries)
+                if not covered:
+                    raise ValueError('No dataset latents match the eye annotation manifest')
+                self.accelerator.print(f'eye regions {covered}/{len(self.dataset.entries)} samples annotated; '
+                                       'remaining samples receive ordinary flow loss only')
+            if cfg.perceptual.dedicated_low_noise:
+                import random
+                self.eye_order = [i for i,e in enumerate(self.dataset.entries)
+                                  if str(e.latent_path.resolve()) in self.perceptual.eye_regions]
+                random.Random(cfg.train.seed + 1000003).shuffle(self.eye_order)
+                self.eye_micro = 0
+        self.adversarial = None
+        if cfg.adversarial.enabled:
+            from .eye_adversarial import EyeAdversarialLoss
+            self.adversarial = EyeAdversarialLoss(self.perceptual,cfg.adversarial,self.accelerator.device)
         self.self_flow_ema = None
         if cfg.self_flow.enabled:
             from .self_flow import AdapterEMA
@@ -666,6 +691,11 @@ class Trainer:
             mask = mask.to(device, torch.float32).unsqueeze(2)
 
         loss = flow_loss(pred, target, mask=mask)
+        if self.paired_texture is not None:
+            if mask is not None:
+                raise ValueError('Paired texture loss does not support masked batches')
+            loss, term = self.paired_texture.apply(loss,pred,latents,noisy,timesteps)
+            self.last_stats['texture'] = term.item()
         loss = loss + self._preserve_term()
         if self.hf_patch is None:
             return loss, None
@@ -675,7 +705,7 @@ class Trainer:
         # would put a target back on exactly the region the mask exists to exclude.
         hf = self.cfg.flow.hf_scale * hf_loss(
             pred, noisy, latents, effective_timesteps(timesteps, second_t, token_mask),
-            self.hf_patch, self.cfg.flow.hf_exponent, mask=mask
+            self.hf_patch, self.cfg.flow.hf_exponent, mask=mask, **self.cfg.flow.hf_gate_kwargs()
         )
         return loss + hf, hf
 
@@ -724,7 +754,23 @@ class Trainer:
                    if "pixels" in batch else [x.to(device,torch.float32) for x in batch["latents"]])
         prepared = [prepare_training_flow_batch(x,self.cfg.flow) for x in latents]
         noisy,times,targets,second_times,token_masks = zip(*prepared)
-        context = self._encode(batch["captions"])
+        ordinary_count = len(latents)
+        dedicated = self.cfg.perceptual.enabled and self.cfg.perceptual.dedicated_low_noise
+        captions = list(batch['captions'])
+        paths = list(batch['paths'])
+        if dedicated:
+            from .perceptual import dedicated_flow_batch
+            ordinal = self.eye_micro*self.accelerator.num_processes+self.accelerator.process_index
+            sample = self.dataset[(self.eye_order[ordinal % len(self.eye_order)],
+                                   self.eye_micro // len(self.loader))]
+            extra = sample['latents'].unsqueeze(0).to(device,torch.float32)
+            extra_noisy, extra_t, extra_target = dedicated_flow_batch(
+                extra, self.cfg.train.seed, ordinal, self.cfg.perceptual.max_t)
+            latents.append(extra)
+            noisy, times, targets = (*noisy, extra_noisy), (*times, extra_t), (*targets, extra_target)
+            captions.append(sample['caption']); paths.append(sample['path'])
+            self.eye_micro += 1
+        context = self._encode(captions)
         predictions = self.transformer(hidden_states=[x.to(self.dtype) for x in noisy],
             timestep=torch.cat(times).to(self.dtype), encoder_hidden_states=context,
             **({"second_timestep": torch.cat(second_times).to(self.dtype),
@@ -732,13 +778,37 @@ class Trainer:
             **({"keep_fraction": self.keep_fraction} if self.rti_interface is not None else {}))[0]
         # Equal sample weighting: a large image must not gain extra influence merely
         # because it contributes more tokens to the packed attention kernel.
-        loss = torch.stack([flow_loss(y,t) for y,t in zip(predictions,targets)]).mean()
+        loss = torch.stack([flow_loss(y,t) for y,t in
+                            zip(predictions[:ordinary_count],targets[:ordinary_count])]).mean()
+        if dedicated:
+            # Keep ordinary loss unchanged; extra example has one full-batch sample's weight.
+            loss = loss + flow_loss(predictions[-1],targets[-1])/self.cfg.train.batch_size
         self.last_stats = {}
+        if self.paired_texture is not None:
+            if batch.get('mask') is not None:
+                raise ValueError('Paired texture loss does not support masked batches')
+            terms = [self.paired_texture.apply(loss.new_zeros(()),y,x,n,t)[0]
+                     for y,x,n,t in zip(predictions[:ordinary_count],latents[:ordinary_count],
+                                        noisy[:ordinary_count],times[:ordinary_count])]
+            texture = torch.stack(terms).mean()
+            loss = loss + texture
+            self.last_stats['texture'] = texture.detach().item()
+        if self.adversarial is not None:
+            loss = loss + self.adversarial.loss(predictions[-1],noisy[-1],latents[-1],times[-1],paths[-1])
+            self.last_stats.update(self.adversarial.last_stats)
+        if self.perceptual is not None:
+            if dedicated:
+                loss = loss + self.perceptual.loss(predictions[-1:],noisy[-1:],latents[-1:],times[-1:],paths[-1:])
+            else:
+                loss = loss + self.perceptual.loss(predictions, noisy, latents, times, paths)
+            if self.perceptual.last_raw is not None:
+                self.last_stats['lpips'] = self.perceptual.last_raw
         loss = loss + self._preserve_term()
         if self.hf_patch is None:
             return loss,None
         hf = self.cfg.flow.hf_scale * torch.stack([
-            hf_loss(y,n,x,effective_timesteps(t,s,m),self.hf_patch,self.cfg.flow.hf_exponent)
+            hf_loss(y,n,x,effective_timesteps(t,s,m),self.hf_patch,self.cfg.flow.hf_exponent,
+                    **self.cfg.flow.hf_gate_kwargs())
             for y,n,x,t,s,m in zip(predictions,noisy,latents,times,second_times,token_masks)]).mean()
         return loss+hf,hf
 
@@ -881,6 +951,27 @@ class Trainer:
 
         if not cfg.train.skip_final_save:
             self.save("final")
+        if self.perceptual is not None:
+            p = self.perceptual
+            stats = acc.gather(torch.tensor([[p.micro, p.applied, p.raw_sum]],
+                                           device=acc.device, dtype=torch.float64)).tolist()
+            acc.print(f'perceptual summary per rank [microbatches, applied, raw_loss_sum]: {stats}')
+        if self.adversarial is not None:
+            from safetensors.torch import save_file
+            import hashlib
+            state = {k:v.detach().cpu().contiguous() for k,v in self.adversarial.discriminator.state_dict().items()}
+            digest = hashlib.sha256(b''.join(v.numpy().tobytes() for v in state.values())).hexdigest()
+            gathered = [None]*acc.num_processes
+            if acc.num_processes > 1:
+                torch.distributed.all_gather_object(gathered,digest)
+            else:
+                gathered = [digest]
+            if len(set(gathered)) != 1:
+                raise RuntimeError('Discriminator replicas diverged')
+            acc.print(f'adversarial discriminator synchronized: {digest}; updates/rank={self.adversarial.micro}')
+            if acc.is_main_process:
+                path = Path(cfg.train.output_dir)/cfg.train.run_name/'eye-discriminator.safetensors'
+                save_file(state,str(path))
         acc.end_training()
 
     def _log(
@@ -920,6 +1011,14 @@ class Trainer:
         )
         # total = mse + hf, so the two printed numbers add up to the first.
         parts = f"loss {value:.4f}"
+        if 'texture' in getattr(self, 'last_stats', {}):
+            parts += f"  texture {self.last_stats['texture']:.5f}"
+        if 'd_loss' in getattr(self, 'last_stats', {}):
+            parts += f"  D {self.last_stats['d_loss']:.4f}"
+            if 'g_loss' in self.last_stats:
+                parts += f"  adv {self.last_stats['g_loss']:.4f}"
+        if 'lpips' in getattr(self, 'last_stats', {}):
+            parts += f"  lpips {self.last_stats['lpips']:.4f}"
         if 'self_flow_alignment' in getattr(self, 'last_stats', {}):
             parts += f"  sf {self.last_stats['self_flow_alignment']:.4f}"
         if hf_value is not None:

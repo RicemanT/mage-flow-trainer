@@ -18,6 +18,9 @@ from .curriculum import Curriculum, Phase
 from .flow import FlowConfig
 from .params import AdapterConfig, ComponentLRs
 from .preserve import PreserveConfig
+from .perceptual import PerceptualConfig
+from .eye_adversarial import EyeAdversarialConfig
+from .paired_texture import PairedTextureConfig
 from .quant import QuantConfig
 from ..modeling.region_tokens import BudgetSchedule
 from .optimizer_specs import OPTIMIZERS
@@ -311,6 +314,9 @@ class Config:
     preserve: PreserveConfig = field(default_factory=PreserveConfig)
     rti: RTIConfig = field(default_factory=RTIConfig)
     self_flow: SelfFlowConfig = field(default_factory=SelfFlowConfig)
+    perceptual: PerceptualConfig = field(default_factory=PerceptualConfig)
+    adversarial: EyeAdversarialConfig = field(default_factory=EyeAdversarialConfig)
+    paired_texture: PairedTextureConfig = field(default_factory=PairedTextureConfig)
     # `[[curriculum]]` -- an array of tables, so it is built by hand in `load_config` rather than
     # through `_SECTIONS`. Empty by default; an empty curriculum is exactly today's behaviour.
     curriculum: Curriculum = field(default_factory=Curriculum)
@@ -334,6 +340,9 @@ _SECTIONS = {
     "preserve": PreserveConfig,
     "rti": RTIConfig,
     "self_flow": SelfFlowConfig,
+    "perceptual": PerceptualConfig,
+    "adversarial": EyeAdversarialConfig,
+    "paired_texture": PairedTextureConfig,
 }
 
 
@@ -347,8 +356,29 @@ def _build(cls, data: dict, path: str):
 
 
 def validate_model_options(cfg):
+    if cfg.paired_texture.scale and (cfg.flow.dual_timestep or cfg.self_flow.enabled
+                                     or any(p.mode == 'texture' for p in cfg.curriculum.phases)):
+        raise ValueError('Paired texture loss requires scalar timesteps and unmasked images; '
+                         'dual timestep, Self-Flow and texture curriculum phases are unsupported')
+    if cfg.adversarial.enabled and (not cfg.perceptual.enabled
+                                    or not cfg.perceptual.dedicated_low_noise
+                                    or cfg.perceptual.weight != 0):
+        raise ValueError('Eye adversarial experiment requires dedicated eye examples and perceptual.weight=0 (LPIPS off)')
     from ..modeling.loader import resolve_model_family
     cfg.train.model_family = resolve_model_family(cfg.train.model_path, cfg.train.model_family)
+    if cfg.perceptual.enabled:
+        if cfg.perceptual.dedicated_low_noise and (cfg.train.gradient_accumulation_steps != 1
+                                                  or type(cfg.train.batch_size) is not int
+                                                  or cfg.train.resume_from):
+            raise ValueError('Dedicated eye experiment requires a fresh run, integer batch_size and gradient_accumulation_steps=1')
+        if (not cfg.train.flux2_vae or not cfg.train.pack_resolutions
+                or cfg.dataset.source != 'latents' or cfg.flow.dual_timestep
+                or cfg.self_flow.enabled or cfg.rti.enabled or cfg.curriculum.phases
+                or cfg.preserve.enabled or cfg.flow.hf_scale or cfg.flow.use_ot
+                or cfg.optimizer.gradient_release):
+            raise ValueError('Decoded perceptual loss requires packed cached FLUX.2/VSF3 latents; '
+                             'dual timestep, Self-Flow, RTI, curriculum, preservation, HF loss, OT '
+                             'and gradient release must be disabled for this experiment')
     if cfg.self_flow.enabled:
         if (cfg.train.model_family != 'mage_flow' or cfg.is_lora
                 or not cfg.train.pack_resolutions or not cfg.flow.dual_timestep

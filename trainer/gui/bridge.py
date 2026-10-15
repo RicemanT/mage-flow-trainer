@@ -37,6 +37,9 @@ from ..training.config import (
     QuantConfig,
     RTIConfig,
     SelfFlowConfig,
+    PerceptualConfig,
+    EyeAdversarialConfig,
+    PairedTextureConfig,
     ScheduleConfig,
     TrainConfig,
     load_config,
@@ -58,6 +61,9 @@ SECTIONS: dict[str, type] = {
     "component_lr": ComponentLRs,
     "rti": RTIConfig,
     "self_flow": SelfFlowConfig,
+    "perceptual": PerceptualConfig,
+    "adversarial": EyeAdversarialConfig,
+    "paired_texture": PairedTextureConfig,
 }
 
 # Fields that exist on a dataclass but are not config keys in their own section -- they are
@@ -84,7 +90,7 @@ def schema() -> dict[str, dc.Field]:
 
 
 # Advanced TOML settings intentionally omitted from the Mage-Flow GUI.
-CLI_ONLY_KEYS = {"adapter.components", "adapter.init", "adapter.init_cache"} | {
+CLI_ONLY_KEYS = {"train.model_family", "adapter.components", "adapter.init", "adapter.init_cache"} | {
     key for key in schema()
     if key.startswith(("preserve.", "component_lr.")) and key != "component_lr.adaln"
 }

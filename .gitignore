@@ -56,3 +56,13 @@ mage-flow/
 benchmarks/kuse-lora/
 
 benchmarks/readme-vram/
+
+# Local experiments, downloaded weights/packages, and reference archives.
+benchmarks/
+models/
+flux3/
+the-trainer-copy/
+the-trainer-copy.zip
+testD_vpred.log
+klein-4b-config.json
+cache-instant-nl-2gpu.py
