@@ -68,6 +68,29 @@ allowing for additional cache storage and VRAM.
 See the [Flux3 guide](docs/flux3-experimental.md) for model layout, limitations,
 validation, and licensing details.
 
+## Experimental MOSS-Image support
+
+**Support may be temporary.** Mage-Flow remains this trainer's primary focus.
+If MOSS-Image sees little adoption or is abandoned by the open-source community,
+its experimental support may be discontinued or removed. Long-term maintenance
+is not guaranteed.
+
+Native **MOSS-Image Base/SFT** supports full finetuning and PEFT/LyCORIS adapters,
+SDNQ UINT8, Cached Text Encoder embeddings, packed `torch_varlen`, checkpointing,
+compile, and GUI configuration. The 5.082B single-stream transformer uses shared
+modulation and Qwen3.5-9B final-layer conditioning. Its packaged FLUX.2 VAE has
+an /8 encoder and a smaller decoder; latent packing gives an effective /16 stride.
+Use fresh latent caches with that VAE.
+
+Start with the [finetuning preset](configs/moss-image-finetune-experimental.toml)
+or [LoCon preset](configs/moss-image-locon-experimental.toml), both defaulting to
+1024px. Replace dataset and model paths. The [MOSS guide](docs/moss-image-experimental.md) documents the
+supported checkpoint layout, validation, sampling choices, and limitations.
+A ten-update 512px DDP full-finetune test at batch 1 per GPU peaked at **15.72 GiB
+allocated per RTX 4090**, using cached short captions, UINT8 SDNQ, Adafactor,
+checkpointing and compile, without CPU offload. This is experimental support;
+smoke tests do not establish image quality or memory needs for longer captions.
+
 ## Start training
 
 For a fresh environment, use `./install.sh` or `install.bat`. The tested environment uses PyTorch 2.10.0 + CUDA 12.8; dependencies are recorded in `uv.lock` and `requirements.txt`.
@@ -290,6 +313,7 @@ See the [test and dtype audit](docs/bisque-finetune-smoke.md) and [full-finetuni
 - [Caption variation cache](docs/caption-variation-cache.md)
 - [SNR-gated HF and paired texture losses](docs/detail-losses.md)
 - [Experimental Flux3 text-to-image training](docs/flux3-experimental.md)
+- [Experimental MOSS-Image training](docs/moss-image-experimental.md)
 - [Reproducible benchmark preset](configs/mageflow-readme-benchmark.toml)
 - [Benchmark methodology and detailed results](docs/readme-vram-benchmark.md)
 

@@ -20,13 +20,16 @@ def model_load_kwargs(train):
 
 
 def resolve_model_family(path, model_family="auto"):
-    if model_family not in (None, "auto", "mage_flow", "flux3"):
+    if model_family not in (None, "auto", "mage_flow", "flux3", "moss_image"):
         raise ValueError(f"Unsupported model family: {model_family}")
     if model_family not in (None, "auto"):
         return model_family
     config = Path(path) / 'config.json'
     if config.is_file() and json.loads(config.read_text()).get('model') == 'flux-3-image-klein':
         return 'flux3'
+    index = Path(path) / 'model_index.json'
+    if index.is_file() and json.loads(index.read_text()).get('_class_name') == 'MOSSImagePipeline':
+        return 'moss_image'
     return "mage_flow"
 
 
@@ -84,7 +87,10 @@ def load_components(
     if family == 'flux3' and load_transformer:
         from .flux3_loader import load_transformer as load_flux3
         transformer = load_flux3(path, transformer_path, dtype)
-    if load_transformer and family != 'flux3':
+    if family == 'moss_image' and load_transformer:
+        from .moss_loader import load_transformer as load_moss
+        transformer = load_moss(path, transformer_path, dtype)
+    if load_transformer and family not in ('flux3', 'moss_image'):
         source = Path(transformer_path) if transformer_path else path / "transformer"
         if source.is_file():
             weights = source
@@ -134,7 +140,17 @@ def load_components(
         transformer.configure_execution()
     encoder = tokenizer = vae = None
     encoder_source, tokenizer_source = text_sources(path, text_encoder_path, tokenizer_path)
-    if load_text_encoder:
+    if family == 'moss_image':
+        encoder_source = Path(text_encoder_path) if text_encoder_path else path / 'text_encoder'
+        tokenizer_source = Path(tokenizer_path) if tokenizer_path else path / 'tokenizer'
+    if load_text_encoder and family == 'moss_image':
+        from transformers import AutoModel
+        if not encoder_source.is_dir():
+            raise ValueError('MOSS text encoder must be a local Hugging Face directory')
+        encoder = AutoModel.from_pretrained(encoder_source, torch_dtype=dtype,
+                                           attn_implementation='sdpa', local_files_only=True)
+        encoder.requires_grad_(False).eval()
+    if load_text_encoder and family != 'moss_image':
         from transformers import Qwen3VLForConditionalGeneration
 
         encoder = (_load_single_text_encoder(encoder_source, dtype) if encoder_source.is_file()
@@ -148,11 +164,11 @@ def load_components(
             tokenizer_source, padding_side="right", local_files_only=True
         )
     if load_vae:
-        if flux2_vae or family == "flux3":
+        if flux2_vae or family in ("flux3", "moss_image"):
             from diffusers import AutoencoderKLFlux2
             source = Path(vae_path) if vae_path else path / "vae"
             if source.is_dir():
-                vae = AutoencoderKLFlux2.from_pretrained(source, torch_dtype=torch.float32 if family == "flux3" else dtype)
+                vae = AutoencoderKLFlux2.from_pretrained(source, torch_dtype=torch.float32 if family in ("flux3", "moss_image") else dtype)
             else:
                 state = load_file(str(source))
                 state = {k.removeprefix("first_stage_model.").removeprefix("module."): v for k, v in state.items()}
@@ -182,12 +198,15 @@ def load_components(
             from .modules.mage_vae import MageVAE
             vae = MageVAE(str(vae_path or path / "vae/diffusion_pytorch_model.safetensors"), sample_posterior=False)
             del vae.decoder_model
-        vae.requires_grad_(False).eval().to(dtype=torch.float32 if family == "flux3" else dtype)
+        vae.requires_grad_(False).eval().to(dtype=torch.float32 if family in ("flux3", "moss_image") else dtype)
     return MageFlowComponents(transformer, encoder, vae, tokenizer, family)
 
 
 @torch.no_grad()
 def encode_prompts(components, prompts, device, max_length=512, *, embedding_only=False):
+    if components.model_family == 'moss_image':
+        from .moss_loader import encode_prompts as encode_moss
+        return encode_moss(components, prompts, device, max_length)
     if components.model_family == 'flux3':
         from .flux3_loader import encode_prompts as encode_flux3
         return encode_flux3(components, prompts, device, max_length)

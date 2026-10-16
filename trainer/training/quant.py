@@ -144,6 +144,13 @@ def quantize_module(
                      'content_mode_blocks.image_cond']
         protected += [f'single_blocks.{i}.' for i in range(max(0,depth-4),depth)]
         cfg = replace(cfg, extra_skip=cfg.extra_skip + ["." + name.rstrip(".") + "." for name in protected])
+    if getattr(module, 'model_family', None) == 'moss_image':
+        # Protect conditioning, shared modulation, and boundary blocks initially.
+        protected = ['video_embedder', 'text_embedder', 'time_embedding',
+                     'shared_block_modulation', 'video_head_modulation',
+                     'final_norm_video', 'final_linear_video', 'layers.0']
+        protected += [f'layers.{i}' for i in range(max(0, module.params.num_layers-2), module.params.num_layers)]
+        cfg = replace(cfg, extra_skip=cfg.extra_skip + ['.'+name+'.' for name in protected])
     is_training = cfg.mode == "training"
     if is_training and cfg.use_stochastic_rounding:
         from .sdnq_rounding import enable_unbiased_integer_rounding

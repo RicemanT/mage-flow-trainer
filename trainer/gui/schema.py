@@ -90,17 +90,17 @@ SPEC: dict[str, Spec] = {
     "train.attention_backend": _spec("Attention backend", "torch_varlen uses PyTorch's built-in packed attention. SDPA uses padded attention.", lambda: F.ChoiceEditor(["sdpa", "torch_varlen", "flash_attn_2", "flash_attn_3"])),
     "train.max_text_tokens": _spec("Maximum text tokens", "Caption token budget after removing the Qwen3-VL system prefix.", lambda: F.IntEditor(1, 4096)),
     # ------------------------------------------------------------------ train
-    "train.model_family": _spec("Model family", "Flux3 text-to-image support is experimental; select SDPA or torch_varlen attention.", lambda: F.ChoiceEditor(["auto", "mage_flow", "flux3"])),
+    "train.model_family": _spec("Model family", "Flux3/MOSS text-to-image support is experimental; select SDPA or torch_varlen attention.", lambda: F.ChoiceEditor(["auto", "mage_flow", "flux3", "moss_image"])),
     "train.model_path": _spec(
         "Model directory",
-        'Local Mage-Flow repository or Flux3 BF16 package with model.safetensors, config.json, text_encoder/ and vae/.',
+        'Local Mage-Flow repository, Flux3 BF16 package, or MOSS-Image package with transformer/, text_encoder/, tokenizer/ and vae/.',
         lambda: F.PathEditor("folder")),
     "train.output_dir": _spec(
         "Output directory",
         "Checkpoints land in <output_dir>/<run_name>/<tag>/.",
         lambda: F.PathEditor("folder")),
     "train.transformer_path": _spec("Transformer file (optional)",
-        "Native Mage-Flow or BF16 Flux3 .safetensors. Overrides transformer weights; leave blank to use the model directory.",
+        "Native Mage-Flow, BF16 Flux3, or unquantized MOSS .safetensors. Overrides transformer weights; leave blank to use the model directory.",
         lambda: F.PathEditor("file")),
     "train.text_encoder_path": _spec("Text encoder file (optional)",
         "Qwen3-VL-4B BF16 .safetensors. Overrides the Diffusers text encoder. Uses the bundled tokenizer by default.",

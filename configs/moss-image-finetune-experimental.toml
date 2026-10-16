@@ -1,0 +1,55 @@
+# Experimental native MOSS-Image Base/SFT finetuning; use its packaged VAE.
+[dataset]
+path = "/path/to/moss-dataset"
+source = "latents"
+resolution = 1024
+max_bucket_reso = 1024
+
+[train]
+model_family = "moss_image"
+model_path = "moss-image"
+run_name = "moss-image-finetune"
+output_dir = "output"
+epochs = 10
+batch_size = 1
+pack_resolutions = true
+attention_backend = "torch_varlen"
+gradient_checkpointing = true
+compile = "default"
+dtype = "bfloat16"
+cache_text_embeddings = true
+caption_variations = 1
+text_cache_batch_size = 1
+max_text_tokens = 512
+save_every_epochs = 1
+
+[adapter]
+kind = "none"
+dtype = "bfloat16"
+
+[quant]
+mode = "training"
+weights_dtype = "uint8"
+use_quantized_matmul = false
+quantize_text_encoder = false
+
+[optimizer]
+kind = "adafactor"
+lr = 2e-5
+norm_mode = "rms_clip"
+use_first_moment = false
+use_kahan = false
+max_grad_norm = 0.0
+quantize_state = false
+offload_state = false
+
+[schedule]
+kind = "constant"
+warmup_steps = 10
+
+[flow]
+timestep_sample_method = "logit_normal"
+shift = 1.0
+
+[dataset.caption]
+caption_mode = "tags"

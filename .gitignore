@@ -71,3 +71,8 @@ cache-instant-nl-2gpu.py
 /configs/mageflow-finetune.toml
 
 !configs/flux3-finetune-experimental.toml
+
+# Local MOSS weights and upstream reference checkout
+/moss-image/
+/MOSS-Image/
+!configs/moss-image-*-experimental.toml

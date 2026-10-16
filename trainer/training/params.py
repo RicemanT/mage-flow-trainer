@@ -51,6 +51,14 @@ def classify(name: str) -> str:
     """Map a transformer parameter name to its component. Unmatched names are an error, not a
     silent drop into a default bucket -- a diffusers version bump that renames a submodule would
     otherwise quietly stop training it."""
+    if name.startswith(('time_embedding.', 'shared_block_modulation.', 'video_head_modulation.')):
+        return 'adaln'
+    if name.startswith(('video_embedder.', 'final_norm_video.', 'final_linear_video.', 'text_embedder.proj.')):
+        return 'base'
+    if name.startswith(('layers.', 'text_embedder.blocks.')):
+        if '.ffn_' in name or '.proj.ffn_' in name:
+            return 'mlp'
+        return 'text_attn' if name.startswith('text_embedder.') else 'image_attn'
     if name.startswith(('early_stream_modulations.', 'single_stream_modulations.', 'time_in.', 'final_layer.image.adaLN_modulation.')):
         return 'adaln'
     if name.startswith(('emb_in.', 'final_layer.image.linear.')):
@@ -240,6 +248,11 @@ def lora_target_modules(components: list[str]) -> list[str]:
 
 def adapter_target_names(transformer, components):
     """Exact targets, excluding the final block's discarded text output branch."""
+    if getattr(transformer, 'model_family', None) == 'moss_image':
+        return [name for name,module in transformer.named_modules()
+                if isinstance(module, nn.Linear)
+                and name.startswith(('layers.', 'text_embedder.blocks.'))
+                and classify(name+'.weight') in components]
     if getattr(transformer, 'model_family', None) == 'flux3':
         return [name for name,module in transformer.named_modules()
                 if isinstance(module, nn.Linear) and '.image_cond.' not in name

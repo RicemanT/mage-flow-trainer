@@ -28,8 +28,12 @@ def _encoder_fingerprint_payload(cfg):
     if overrides:
         from ..modeling.loader import ASSETS, text_sources
 
-        sources = list(text_sources(root, getattr(cfg.train, "text_encoder_path", None),
-                                    getattr(cfg.train, "tokenizer_path", None)))
+        if getattr(cfg.train, 'model_family', None) == 'moss_image':
+            sources = [Path(getattr(cfg.train, 'text_encoder_path', None) or root / 'text_encoder'),
+                       Path(getattr(cfg.train, 'tokenizer_path', None) or root / 'tokenizer')]
+        else:
+            sources = list(text_sources(root, getattr(cfg.train, "text_encoder_path", None),
+                                        getattr(cfg.train, "tokenizer_path", None)))
         if sources[0].is_file():
             sources.append(ASSETS / "qwen3vl4b/config.json")
     else:
@@ -69,6 +73,10 @@ def _encoder_fingerprint_payload(cfg):
         from ..modeling.flux3_loader import TEXT_TEMPLATE, TEXT_LAYERS
         payload.update(model_family='flux3', template=TEXT_TEMPLATE, layers=TEXT_LAYERS,
                        padding_multiple=80, padding_cap="max_text_tokens", final_norm="encoder_last_layer", padding_positions=1)
+    if resolve_model_family(root, getattr(cfg.train, "model_family", "auto")) == 'moss_image':
+        from ..modeling.moss_loader import TEXT_TEMPLATE_VERSION
+        payload.update(model_family='moss_image', template=TEXT_TEMPLATE_VERSION,
+                       layers='last_hidden_state', padding='individual_unpadded')
     return payload
 
 
