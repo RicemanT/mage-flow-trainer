@@ -1,0 +1,55 @@
+[dataset]
+path = "/path/to/flux3-dataset"
+source = "latents"
+resolution = 768
+max_bucket_reso = 2096
+
+[train]
+model_family = "flux3"
+model_path = "flux3"
+transformer_path = ""
+text_encoder_path = ""
+vae_path = ""
+tokenizer_path = ""
+output_dir = "output"
+run_name = "flux3-finetune-uint8-adafactor-512-varlen"
+epochs = 10
+batch_size = 4
+pack_resolutions = true
+attention_backend = "torch_varlen"
+cache_text_embeddings = true
+text_cache_batch_size = 24
+caption_variations = 4
+caption_cache_path = "/path/to/flux3-dataset/caption_variations.sqlite"
+compile = "default"
+
+[optimizer]
+kind = "adafactor"
+lr = 2e-5
+max_grad_norm = 0.0
+norm_mode = "rms_clip"
+quantize_state = true
+
+[schedule]
+warmup_steps = 10
+
+[adapter]
+kind = "none"
+dtype = "bfloat16"
+
+[flow]
+shift = 6.93
+hf_high_noise_snr_cut = 0.111111111111
+
+[paired_texture]
+snr_cut = 0.111111111111
+
+[quant]
+mode = "training"
+weights_dtype = "uint8"
+use_quantized_matmul = false
+
+[dataset.caption]
+caption_mode = "mixed"
+mixed_weights = { tags = 30, nl = 30, tags_nl = 20, nl_tags = 20 }
+protected_tags = []

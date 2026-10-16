@@ -1,0 +1,56 @@
+[dataset]
+path = "/home/bluvoll/Escritorio/kanojos"
+source = "latents"
+max_bucket_reso = 1024
+
+[train]
+model_family = "flux3"
+model_path = "flux3"
+transformer_path = ""
+text_encoder_path = ""
+vae_path = ""
+tokenizer_path = ""
+output_dir = "output"
+run_name = "flux3-locon-experimental"
+epochs = 50
+batch_size = 6
+pack_resolutions = true
+cache_text_embeddings = true
+caption_variations = 5
+caption_cache_path = ""
+compile = "default"
+
+[optimizer]
+kind = "adafactor"
+lr = 0.0001
+max_grad_norm = 0.0
+norm_mode = "rms_clip"
+quantize_state = true
+
+[schedule]
+kind = "rex"
+warmup_steps = 10
+
+[adapter]
+kind = "lycoris_lora"
+rank = 16
+dtype = "bfloat16"
+alpha = 16.0
+
+[flow]
+# Training distribution is independent of the inference schedule.
+timestep_sample_method = "logit_normal"
+shift = 6.93
+hf_high_noise_snr_cut = 0.111111111111
+
+[paired_texture]
+snr_cut = 0.111111111111
+
+[quant]
+mode = "frozen"
+weights_dtype = "uint8"
+use_quantized_matmul = false
+
+[dataset.caption]
+caption_mode = "nl"
+protected_tags = []

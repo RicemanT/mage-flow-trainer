@@ -81,7 +81,7 @@ class LatentCacher:
         """[B,3,1,H,W] pixels -> [B,128,1,H/16,W/16], without rescaling."""
         if x.ndim != 5 or x.shape[2] != 1:
             raise ValueError("Mage-VAE only supports image batches")
-        encoded = self.vae.encode(x.squeeze(2).to(self.device, self.dtype))
+        encoded = self.vae.encode(x.squeeze(2).to(self.device, next(self.vae.parameters()).dtype))
         latents = encoded.latent_dist.mean if hasattr(encoded, "latent_dist") else encoded
         if self.flux2_vae and not getattr(self.vae, "outputs_packed_flux2", False):
             latents = torch.nn.functional.pixel_unshuffle(latents, 2)

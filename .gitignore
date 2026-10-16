@@ -66,3 +66,8 @@ the-trainer-copy.zip
 testD_vpred.log
 klein-4b-config.json
 cache-instant-nl-2gpu.py
+# Public experimental template; keep the local machine-specific finetune config private.
+!configs/flux3-locon-experimental.toml
+/configs/mageflow-finetune.toml
+
+!configs/flux3-finetune-experimental.toml

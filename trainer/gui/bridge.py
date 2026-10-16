@@ -90,7 +90,7 @@ def schema() -> dict[str, dc.Field]:
 
 
 # Advanced TOML settings intentionally omitted from the Mage-Flow GUI.
-CLI_ONLY_KEYS = {"train.model_family", "adapter.components", "adapter.init", "adapter.init_cache"} | {
+CLI_ONLY_KEYS = {"adapter.components", "adapter.init", "adapter.init_cache"} | {
     key for key in schema()
     if key.startswith(("preserve.", "component_lr.")) and key != "component_lr.adaln"
 }

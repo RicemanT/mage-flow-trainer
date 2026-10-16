@@ -32,3 +32,12 @@ trainer/modeling/LICENSE.gilbert and https://github.com/jakubcerveny/gilbert.
 Batched execution, packed attention and text extraction: diffusion-pipe-mageflow-ft
 commit 40bf63a59269b5cfd73508ff25b5da7357cb1db1, GPL-3.0; see
 trainer/modeling/LICENSE.diffusion-pipe. The combined distribution is GPL-3.0.
+
+Experimental Flux3
+------------------
+The native Flux3 implementation follows the architecture and checkpoint layout
+provided in the local BFL Flux 3 Image Klein Base package and the ComfyUI
+comfy/ldm/flux3/model.py inference implementation (ComfyUI, GPL-3.0).
+https://github.com/comfyanonymous/ComfyUI
+Training uses out-of-place PyTorch operations and this trainer's SDNQ integration.
+No Flux3 weights are distributed; the downloaded package retains its own license.

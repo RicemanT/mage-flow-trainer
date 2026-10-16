@@ -134,6 +134,16 @@ def quantize_module(
     from sdnq import apply_sdnq_to_module
     from sdnq.training import add_module_skip_keys, apply_sdnq_training_to_module
 
+    if getattr(module, 'model_family', None) == 'flux3':
+        # Conservative protection inspired by the package's FP8/NVFP4 exclusions.
+        # Inference quantization recipes are not assumed to be training recipes.
+        depth = module.params.depth_single
+        protected = ['emb_in', 'txt_in', 'time_in', 'final_layer',
+                     'early_stream_modulations', 'single_stream_modulations',
+                     'txt_mode_blocks', 'content_mode_blocks.image.0.',
+                     'content_mode_blocks.image_cond']
+        protected += [f'single_blocks.{i}.' for i in range(max(0,depth-4),depth)]
+        cfg = replace(cfg, extra_skip=cfg.extra_skip + ["." + name.rstrip(".") + "." for name in protected])
     is_training = cfg.mode == "training"
     if is_training and cfg.use_stochastic_rounding:
         from .sdnq_rounding import enable_unbiased_integer_rounding

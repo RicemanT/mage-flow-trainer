@@ -54,7 +54,7 @@ def _encoder_fingerprint_payload(cfg):
     if quant_payload is not None:
         # Selector metadata is not encoder behavior; preserve existing cache keys.
         quant_payload.pop("text_encoder_weights_dtype", None)
-    return dict(
+    payload = dict(
         version=1,
         versions=versions,
         files=files,
@@ -63,6 +63,13 @@ def _encoder_fingerprint_payload(cfg):
         template=(PROMPT_TEMPLATE_ENCODE, PROMPT_TEMPLATE_ENCODE_START_IDX),
         quant=quant_payload,
     )
+
+    from ..modeling.loader import resolve_model_family
+    if resolve_model_family(root, getattr(cfg.train, "model_family", "auto")) == 'flux3':
+        from ..modeling.flux3_loader import TEXT_TEMPLATE, TEXT_LAYERS
+        payload.update(model_family='flux3', template=TEXT_TEMPLATE, layers=TEXT_LAYERS,
+                       padding_multiple=80, padding_cap="max_text_tokens", final_norm="encoder_last_layer", padding_positions=1)
+    return payload
 
 
 def encoder_fingerprint(cfg, cache_path=None):

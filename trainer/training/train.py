@@ -335,7 +335,7 @@ class Trainer:
         self.source_checkpoint = None
         if self.accelerator.is_main_process:
             from ..modeling.checkpoint_metadata import checkpoint_identity
-            source = cfg.train.transformer_path or Path(cfg.train.model_path) / 'transformer'
+            source = cfg.train.transformer_path or Path(cfg.train.model_path) / ('model.safetensors' if cfg.train.model_family == 'flux3' else 'transformer')
             self.accelerator.print(f"Hashing source transformer: {source}")
             self.source_checkpoint = checkpoint_identity(source)
         self.text_cache = None

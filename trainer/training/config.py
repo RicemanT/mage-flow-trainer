@@ -164,7 +164,7 @@ DEFAULT_MODEL_PATH = os.environ.get("MAGE_FLOW_MODEL", "mage-flow")
 
 @dataclass
 class TrainConfig:
-    model_family: str = "auto"  # auto | mage_flow
+    model_family: str = "auto"  # auto | mage_flow | flux3
     model_path: str = DEFAULT_MODEL_PATH
     transformer_path: str | None = None
     text_encoder_path: str | None = None
@@ -241,11 +241,13 @@ class TrainConfig:
     compile_regional: bool = True
 
     def __post_init__(self):
-        if self.model_family not in ("auto", "mage_flow"):
-            raise ValueError("train.model_family must be auto or mage_flow")
+        if self.model_family not in ("auto", "mage_flow", "flux3"):
+            raise ValueError("train.model_family must be auto, mage_flow or flux3")
         if self.compile is False:
             self.compile = None
-        if self.pack_resolutions and (self.attention_backend == "sdpa" or type(self.batch_size) is not int or self.batch_size < 1):
+        from ..modeling.loader import resolve_model_family
+        is_flux3 = resolve_model_family(self.model_path, self.model_family) == 'flux3'
+        if self.pack_resolutions and ((self.attention_backend == "sdpa" and not is_flux3) or type(self.batch_size) is not int or self.batch_size < 1):
             raise ValueError("pack_resolutions requires packed attention and a positive integer batch_size")
         if type(self.text_cache_batch_size) is not int or self.text_cache_batch_size < 1:
             raise ValueError("train.text_cache_batch_size must be a positive integer")
@@ -366,6 +368,15 @@ def validate_model_options(cfg):
         raise ValueError('Eye adversarial experiment requires dedicated eye examples and perceptual.weight=0 (LPIPS off)')
     from ..modeling.loader import resolve_model_family
     cfg.train.model_family = resolve_model_family(cfg.train.model_path, cfg.train.model_family)
+    if cfg.train.model_family == 'flux3':
+        cfg.train.flux2_vae = True
+        if (cfg.flow.dual_timestep or cfg.self_flow.enabled or cfg.rti.enabled or
+            cfg.perceptual.enabled or cfg.adversarial.enabled or cfg.preserve.enabled or cfg.curriculum.phases):
+            raise ValueError('Experimental Flux3 supports text-to-image flow training without RTI, Self-Flow, dual timestep, decoded losses or curricula')
+        if cfg.train.attention_backend not in ('sdpa', 'torch_varlen') or cfg.train.checkpoint_blocks is not None:
+            raise ValueError('Experimental Flux3 requires SDPA or torch_varlen and all-block checkpointing')
+        if cfg.train.compile_text_encoder or cfg.train.text_encoder_embedding_only:
+            raise ValueError('Flux3 multi-layer text extraction requires compile_text_encoder=false and text_encoder_embedding_only=false')
     if cfg.perceptual.enabled:
         if cfg.perceptual.dedicated_low_noise and (cfg.train.gradient_accumulation_steps != 1
                                                   or type(cfg.train.batch_size) is not int

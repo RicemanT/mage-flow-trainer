@@ -51,6 +51,13 @@ def classify(name: str) -> str:
     """Map a transformer parameter name to its component. Unmatched names are an error, not a
     silent drop into a default bucket -- a diffusers version bump that renames a submodule would
     otherwise quietly stop training it."""
+    if name.startswith(('early_stream_modulations.', 'single_stream_modulations.', 'time_in.', 'final_layer.image.adaLN_modulation.')):
+        return 'adaln'
+    if name.startswith(('emb_in.', 'final_layer.image.linear.')):
+        return 'base'
+    if name.startswith(('content_mode_blocks.', 'txt_mode_blocks.', 'single_blocks.')):
+        if '.mlp_' in name: return 'mlp'
+        return 'text_attn' if name.startswith('txt_mode_blocks.') else 'image_attn'
     for component, pattern in _COMPONENT_PATTERNS:
         if pattern.match(name):
             return component
@@ -139,7 +146,11 @@ def build_param_groups(
     counts: dict[str, int] = {}
     frozen: dict[str, int] = {}
 
-    named = [(classify(n), p) for n, p in transformer.named_parameters()]
+    named = [(classify(n), p) for n, p in transformer.named_parameters()
+             if not (getattr(transformer, 'model_family', None) == 'flux3' and '.image_cond.' in n)]
+    if getattr(transformer, 'model_family', None) == 'flux3':
+        for n,p in transformer.named_parameters():
+            if '.image_cond.' in n: p.requires_grad_(False)
 
     for component, param in named:
         if lrs.resolve(component, default_lr) == 0.0:
@@ -229,6 +240,11 @@ def lora_target_modules(components: list[str]) -> list[str]:
 
 def adapter_target_names(transformer, components):
     """Exact targets, excluding the final block's discarded text output branch."""
+    if getattr(transformer, 'model_family', None) == 'flux3':
+        return [name for name,module in transformer.named_modules()
+                if isinstance(module, nn.Linear) and '.image_cond.' not in name
+                and name.startswith(('content_mode_blocks.', 'txt_mode_blocks.', 'single_blocks.'))
+                and classify(name+'.weight') in components]
     suffixes = lora_target_modules(components)
     last = f"transformer_blocks.{len(transformer.transformer_blocks) - 1}."
     unused = {last + suffix for suffix in (

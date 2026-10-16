@@ -178,7 +178,8 @@ def cmd_cache(args) -> int:
     # A named FLUX.2 checkpoint is unambiguous. Keep the explicit switch for
     # generic filenames, but do not let a GUI/CLI wiring omission feed Flux
     # weights into MageVAE and fail several seconds after planning the cache.
-    args.flux2_vae = bool(args.flux2_vae or "flux2" in Path(args.vae_path or "").name.lower())
+    from ..modeling.loader import resolve_model_family
+    args.flux2_vae = resolve_model_family(args.model_path, args.model_family) == 'flux3' or bool(args.flux2_vae or "flux2" in Path(args.vae_path or "").name.lower())
     # The common ComfyUI `flux2-vae.safetensors` export is the legacy LDM
     # implementation. Its compatible module is shipped with ComfyUI and is
     # compiled for ComfyUI's Python, not this trainer's virtualenv. Re-exec
@@ -199,6 +200,7 @@ def cmd_cache(args) -> int:
     components = load_components(
         args.model_path, dtype=torch.bfloat16,
         vae_path=args.vae_path,
+        model_family=args.model_family,
         flux2_vae=args.flux2_vae,
         load_text_encoder=False, load_vae=True, load_tokenizers=False, load_transformer=False,
     )
@@ -341,7 +343,7 @@ def main() -> int:
     c = sub.add_parser("cache", help="encode images to cached latents")
     c.add_argument("path")
     c.add_argument("--model-path", default=DEFAULT_MODEL_PATH)
-    c.add_argument("--model-family", choices=["auto", "mage_flow"], default="auto")
+    c.add_argument("--model-family", choices=["auto", "mage_flow", "flux3"], default="auto")
     c.add_argument("--vae-path", help="Separate Mage-Flow VAE .safetensors (overrides --model-path)")
     c.add_argument("--flux2-vae", action="store_true", help="Experimental: encode with FLUX.2 VAE, pack 32c/8x to 128c/16x, and apply vae_bn normalization")
     c.add_argument("--resolution", type=int, nargs="+", default=[1024],

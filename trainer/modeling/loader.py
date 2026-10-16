@@ -16,12 +16,17 @@ ASSETS = Path(__file__).with_name("assets")
 
 def model_load_kwargs(train):
     return {name: getattr(train, name, "float32" if name == "compressed_adaln_dtype" else None) for name in
-            ("transformer_path", "text_encoder_path", "vae_path", "tokenizer_path", "compressed_adaln_dtype", "flux2_vae")}
+            ("transformer_path", "text_encoder_path", "vae_path", "tokenizer_path", "compressed_adaln_dtype", "flux2_vae", "model_family")}
 
 
 def resolve_model_family(path, model_family="auto"):
-    if model_family not in (None, "auto", "mage_flow"):
-        raise ValueError(f"Unsupported model family: {model_family}; this trainer supports Mage-Flow only")
+    if model_family not in (None, "auto", "mage_flow", "flux3"):
+        raise ValueError(f"Unsupported model family: {model_family}")
+    if model_family not in (None, "auto"):
+        return model_family
+    config = Path(path) / 'config.json'
+    if config.is_file() and json.loads(config.read_text()).get('model') == 'flux-3-image-klein':
+        return 'flux3'
     return "mage_flow"
 
 
@@ -55,6 +60,7 @@ class MageFlowComponents:
     text_encoder: torch.nn.Module | None
     vae: torch.nn.Module | None
     tokenizer: object | None
+    model_family: str = "mage_flow"
 
 
 def load_components(
@@ -70,10 +76,15 @@ def load_components(
     tokenizer_path=None,
     compressed_adaln_dtype="float32",
     flux2_vae=False,
+    model_family="auto",
 ):
     path = Path(path)
+    family = resolve_model_family(path, model_family)
     transformer = None
-    if load_transformer:
+    if family == 'flux3' and load_transformer:
+        from .flux3_loader import load_transformer as load_flux3
+        transformer = load_flux3(path, transformer_path, dtype)
+    if load_transformer and family != 'flux3':
         source = Path(transformer_path) if transformer_path else path / "transformer"
         if source.is_file():
             weights = source
@@ -137,11 +148,11 @@ def load_components(
             tokenizer_source, padding_side="right", local_files_only=True
         )
     if load_vae:
-        if flux2_vae:
+        if flux2_vae or family == "flux3":
             from diffusers import AutoencoderKLFlux2
             source = Path(vae_path) if vae_path else path / "vae"
             if source.is_dir():
-                vae = AutoencoderKLFlux2.from_pretrained(source, torch_dtype=dtype)
+                vae = AutoencoderKLFlux2.from_pretrained(source, torch_dtype=torch.float32 if family == "flux3" else dtype)
             else:
                 state = load_file(str(source))
                 state = {k.removeprefix("first_stage_model.").removeprefix("module."): v for k, v in state.items()}
@@ -171,12 +182,15 @@ def load_components(
             from .modules.mage_vae import MageVAE
             vae = MageVAE(str(vae_path or path / "vae/diffusion_pytorch_model.safetensors"), sample_posterior=False)
             del vae.decoder_model
-        vae.requires_grad_(False).eval().to(dtype=dtype)
-    return MageFlowComponents(transformer, encoder, vae, tokenizer)
+        vae.requires_grad_(False).eval().to(dtype=torch.float32 if family == "flux3" else dtype)
+    return MageFlowComponents(transformer, encoder, vae, tokenizer, family)
 
 
 @torch.no_grad()
 def encode_prompts(components, prompts, device, max_length=512, *, embedding_only=False):
+    if components.model_family == 'flux3':
+        from .flux3_loader import encode_prompts as encode_flux3
+        return encode_flux3(components, prompts, device, max_length)
     tokens = components.tokenizer(
         [PROMPT_TEMPLATE_ENCODE.format(p) for p in prompts],
         padding=True,

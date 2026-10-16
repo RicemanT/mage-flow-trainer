@@ -35,6 +35,8 @@ def checkpoint_identity(path):
     compressed = 'modulation_down.weight' in keys
     rti = any(k.startswith('region_interface.') for k in keys)
     kind = ('compressed' if compressed else 'full_mage_flow') + ('_rti' if rti else '')
+    if 'single_blocks.0.q_proj.weight' in keys and 'emb_in.image.weight' in keys:
+        kind = 'flux3'
     after = weights.stat()
     if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
         raise RuntimeError(f'Source checkpoint changed while hashing: {weights}')
