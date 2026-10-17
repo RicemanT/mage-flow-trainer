@@ -35,7 +35,8 @@ def _encoder_fingerprint_payload(cfg):
             sources = list(text_sources(root, getattr(cfg.train, "text_encoder_path", None),
                                         getattr(cfg.train, "tokenizer_path", None)))
         if sources[0].is_file():
-            sources.append(ASSETS / "qwen3vl4b/config.json")
+            sources.append(root / "text_encoder/config.json" if getattr(cfg.train, "model_family", None) == "moss_image"
+                           else ASSETS / "qwen3vl4b/config.json")
     else:
         # Preserve existing cache keys for the original directory loading method.
         sources = [root / folder for folder in ("text_encoder", "tokenizer")]

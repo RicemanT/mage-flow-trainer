@@ -21,6 +21,26 @@ are accepted. `train.transformer_path` can override the transformer; the package
 still supplies its architecture configuration. Fused-qkv and prequantized
 inference exports are not accepted as training sources.
 
+Separate components are also supported through the GUI's text encoder and VAE
+file fields or `train.text_encoder_path` and `train.vae_path`:
+
+- Qwen3.5 text encoders accept local Hugging Face directories or single-file
+  BF16/FP32 and Comfy INT8 `int8_tensorwise` safetensors, including ConvRot.
+  Single files use `model_path/text_encoder/config.json` and the package tokenizer
+  (or `train.tokenizer_path`). The text-only model omits vision, generation-head,
+  and multi-token prediction weights. INT8 weights are dequantized and ConvRot
+  is reversed in FP32, then stored in the requested training dtype. This is
+  **not INT8 execution**: BF16 text weights occupy approximately 15 GiB. Optional
+  SDNQ text-encoder quantization can reduce memory, with additional quantization
+  error. Cached Text Encoder mode releases the encoder after caching.
+- FLUX.2 VAEs accept Diffusers directories and standalone Diffusers/original-LDM
+  safetensors. Encoder and decoder widths are inferred independently, supporting
+  both the regular and MOSS small decoder. No ComfyUI or `comfy_kitchen` import is
+  needed. Latent packing and batch-normalization statistics remain unchanged.
+
+Use the VAE that matches the base model, and rebuild latents when changing VAEs.
+Filenames alone do not establish the decoder architecture or checkpoint identity.
+
 ```bash
 python -m trainer.tools.cache_latents cache-config configs/moss-image-finetune-experimental.toml --batch-size 1
 python -m trainer.training.train configs/moss-image-finetune-experimental.toml
