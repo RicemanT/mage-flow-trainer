@@ -98,7 +98,8 @@ class AttributionTests(unittest.TestCase):
         plain = CaptionConfig(shuffle_tags=True)
         legacy = asdict(plain)
         for key in ("attribution_patterns", "attribution_position",
-                    "attribution_dropout_immune", "attribution_dedupe_on_combine"):
+                    "attribution_dropout_immune", "attribution_dedupe_on_combine",
+                    "protected_tags_file"):   # a machine-specific path, never part of the key
             legacy.pop(key)
         self.assertEqual(digest(caption_identity(plain)), digest(legacy))
         self.assertNotEqual(digest(caption_identity(self.cfg(shuffle_tags=True))), digest(legacy))
