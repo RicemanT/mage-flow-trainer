@@ -476,23 +476,24 @@ class BucketMapEditor(_Blockable):
 class WeightsEditor(_Blockable):
     """`caption.mixed_weights` -- relative, not percentages, so no normalisation is imposed."""
 
-    def __init__(self, keys):
+    def __init__(self, keys, per_row=4):
         container = QtWidgets.QWidget()
-        row = QtWidgets.QHBoxLayout(container)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
+        grid = QtWidgets.QGridLayout(container)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
         self.spins = {}
         super().__init__(container)
-        for k in keys:
-            row.addWidget(make_label(k, bold=False))
+        for i, k in enumerate(keys):
+            row, col = divmod(i, per_row)
+            grid.addWidget(make_label(k, bold=False), row, col * 2)
             spin = NoScrollSpinBox()
             spin.setLocale(QtCore.QLocale.c())
             spin.setRange(0, 1000)
             spin.setMinimumWidth(78)
             spin.valueChanged.connect(self._emit)
-            row.addWidget(spin)
+            grid.addWidget(spin, row, col * 2 + 1)
             self.spins[k] = spin
-        row.addStretch(1)
+        grid.setColumnStretch(per_row * 2, 1)
 
     def get(self):
         return {k: int(s.value()) for k, s in self.spins.items()}

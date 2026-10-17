@@ -20,6 +20,7 @@ from torch.utils.data import Dataset, Sampler
 
 from .bucket import BucketManager, verify_max_resolution
 from .caption import CaptionConfig, build_caption, read_caption_files
+from .moss_captions import annotations_for
 from .texture import TextureConfig, fitting_canvases
 from .cache import (
     CACHE_SUFFIX,
@@ -584,6 +585,7 @@ class MageFlowDataset(Dataset):
                     ImageEntry(
                         path=p,  # the cache file itself; there may be no image any more
                         latent_path=p, bucket=bucket, tags=tags, nl=nl, resolution=tier,
+                        source_size=tuple(size) if size else (0, 0),   # layouts map boxes into the crop
                     )
                 )
 
@@ -777,7 +779,8 @@ class MageFlowDataset(Dataset):
 
         caption = (self.caption_variation_cache.caption(index, epoch)
                    if hasattr(self, "caption_variation_cache")
-                   else build_caption(e.tags, e.nl, self.config.caption, rng))
+                   else build_caption(e.tags, e.nl, self.config.caption, rng,
+                                      annotations_for(e, self.config.caption)))
         sample = {"caption": caption, "bucket": e.bucket, "path": str(e.path)}
 
         if self.encode_on_the_fly:

@@ -20,6 +20,10 @@ from pathlib import Path
 CaptionMode = str  # "tags" | "nl" | "tags_nl" | "nl_tags" | "mixed"
 
 _VARIANTS = ("tags", "nl", "tags_nl", "nl_tags")
+# MOSS-Image annotations (moss_captions.py): captions at three lengths and layouts, from <stem>_moss.json and
+# <stem>_layout.json. A sample without the needed file falls back to its NL caption, then its tags.
+_ANNOTATION_VARIANTS = ("short", "medium", "long", "layout")
+_ALL_VARIANTS = _VARIANTS + _ANNOTATION_VARIANTS
 
 # Fields added by the attribution feature. Kept out of a caption config's identity while they sit at
 # their defaults, so turning the feature on is the only thing that invalidates existing
@@ -29,6 +33,8 @@ _ATTRIBUTION_DEFAULTS = {
     "attribution_position": "fixed",
     "attribution_dropout_immune": True,
     "attribution_dedupe_on_combine": True,
+    "keep_order_through_attribution": False,
+    "annotation_attribution_template": "{attribution}. {caption}",
 }
 
 
@@ -71,13 +77,29 @@ class CaptionConfig:
     # tags_nl / nl_tags join both fields, so an attribution present in both would appear twice.
     # True strips the trailing field's copy of any attribution the leading field already carries.
     attribution_dedupe_on_combine: bool = True
+    # MOSS tag order (quality, meta, year, character, series, @artist, general): every tag up to and including
+    # the last attribution tag keeps its place and is never dropped; dropout and shuffling apply only to the
+    # general tags after it. Needs attribution_patterns (e.g. ["^@"]).
+    keep_order_through_attribution: bool = False
+    # How the artist reaches the annotation captions (short / medium / long / layout summary), which never name
+    # the artist themselves: {attribution} = the caption's attribution tags joined with ", ". "" = leave it out.
+    annotation_attribution_template: str = "{attribution}. {caption}"
 
     def __post_init__(self):
-        if self.caption_mode not in (*_VARIANTS, "mixed"):
+        if self.caption_mode not in (*_ALL_VARIANTS, "mixed"):
             raise ValueError(f"unknown caption_mode: {self.caption_mode}")
         for k in self.mixed_weights:
-            if k not in _VARIANTS:
+            if k not in _ALL_VARIANTS:
                 raise ValueError(f"unknown mixed_weights key: {k}")
+        # A GUI save writes every weight; unused annotation weights are dropped so a config that does not
+        # use them keeps exactly its old caption-cache key.
+        self.mixed_weights = {k: v for k, v in self.mixed_weights.items()
+                              if v or k not in _ANNOTATION_VARIANTS}
+        if self.annotation_attribution_template and "{caption}" not in self.annotation_attribution_template:
+            raise ValueError("dataset.caption.annotation_attribution_template must contain {caption}")
+        if self.keep_order_through_attribution and not self.attribution_patterns:
+            raise ValueError("dataset.caption.keep_order_through_attribution needs attribution_patterns "
+                             "(e.g. [\"^@\"]) to find where the general tags begin")
         if not 0.0 <= self.tag_dropout_percent <= 1.0:
             raise ValueError("tag_dropout_percent must be in [0,1]")
         if not 0.0 <= self.caption_dropout_percent <= 1.0:
@@ -212,8 +234,10 @@ def _join_sentences(parts: list[str]) -> str:
     return out if not out or out.endswith(".") else out + "."
 
 
-def select_variant(cfg: CaptionConfig, has_nl: bool, rng: random.Random) -> str:
-    """Pick a caption form. Falls back to tags-only when the sample has no NL caption."""
+def select_variant(cfg: CaptionConfig, has_nl: bool, rng: random.Random,
+                   available: frozenset | set = frozenset()) -> str:
+    """Pick a caption form. An annotation variant the sample has no file for falls back to its NL caption,
+    and an NL variant without an NL caption to tags-only."""
     if cfg.caption_mode != "mixed":
         variant = cfg.caption_mode
     else:
@@ -223,6 +247,8 @@ def select_variant(cfg: CaptionConfig, has_nl: bool, rng: random.Random) -> str:
         keys = list(weights)
         variant = rng.choices(keys, weights=[weights[k] for k in keys], k=1)[0]
 
+    if variant in _ANNOTATION_VARIANTS and variant not in available:
+        variant = "nl"
     if not has_nl and variant in ("nl", "tags_nl", "nl_tags"):
         return "tags"
     return variant
@@ -233,9 +259,11 @@ def build_caption(
     nl_text: str | None,
     cfg: CaptionConfig,
     rng: random.Random | None = None,
+    annotations=None,
 ) -> str:
     """Produce the final caption string for one sample.
 
+    `annotations` (moss_captions.Annotations) supplies the short / medium / long / layout variants.
     Returns "" when caption dropout fires — the unconditional sample the model needs for CFG.
     """
     rng = rng or random
@@ -243,7 +271,10 @@ def build_caption(
     if cfg.caption_dropout_percent > 0 and rng.random() < cfg.caption_dropout_percent:
         return ""
 
-    variant = select_variant(cfg, bool(nl_text), rng)
+    variant = select_variant(cfg, bool(nl_text), rng,
+                             annotations.available() if annotations is not None else frozenset())
+    if variant in _ANNOTATION_VARIANTS:
+        return _build_annotation(tags_text, variant, cfg, annotations)
 
     if cfg.attribution_enabled:
         return _build_attributed(tags_text, nl_text, variant, cfg, rng)
@@ -308,6 +339,11 @@ def _place(entries: list[str], attrs: list[str], cfg: CaptionConfig,
 
 def _process_tags_attributed(tags: list[str], cfg: CaptionConfig,
                              rng: random.Random) -> list[str]:
+    if cfg.keep_order_through_attribution:
+        last = max((i for i, t in enumerate(tags) if is_attribution(t, cfg)), default=-1)
+        if last >= 0:
+            head = tags[:last + 1]
+            return head + process_tags(tags[last + 1:], cfg, rng, extra_kept=len(head))
     if cfg.attribution_dropout_immune:
         attrs, rest = _split_attribution(tags, cfg)
         return _place(process_tags(rest, cfg, rng, extra_kept=len(attrs)), attrs, cfg, rng)
@@ -379,6 +415,26 @@ def _build_attributed(tags_text: str, nl_text: str | None, variant: str, cfg: Ca
         tags_str = cfg.tag_delimiter.join(tags)
         return f"{nl_str} {tags_str}" if tags_str else nl_str
     raise AssertionError(f"unreachable variant {variant}")
+
+
+def _build_annotation(tags_text: str, variant: str, cfg: CaptionConfig, annotations) -> str:
+    """A MOSS annotation caption, with the artist (the caption's attribution tags) added by the template:
+    the annotation files never name the artist themselves."""
+    prefix_parts = []
+    if cfg.attribution_enabled and cfg.annotation_attribution_template:
+        attrs = [t for t in split_tags(tags_text, cfg.tag_delimiter) if is_attribution(t, cfg)]
+        if attrs:
+            prefix_parts = [", ".join(attrs)]
+    if variant == "layout":
+        prefix = ""
+        if prefix_parts:
+            # The template's text around {caption}, applied to the layout summary's caption.
+            prefix = cfg.annotation_attribution_template.split("{caption}")[0].format(attribution=prefix_parts[0])
+        return annotations.layout(prefix) or ""
+    text = annotations.caption(variant) or ""
+    if prefix_parts and text:
+        return cfg.annotation_attribution_template.format(attribution=prefix_parts[0], caption=text)
+    return text
 
 
 def read_caption_files(image_path: str | Path) -> tuple[str, str | None]:

@@ -13,6 +13,7 @@ import torch
 from torch.nn.utils.rnn import pad_sequence
 
 from .caption import build_caption, caption_identity
+from .moss_captions import annotations_for
 
 
 def digest(value):
@@ -183,6 +184,9 @@ class CaptionVariationCache:
             # The folder's name, not its absolute path: a cache built where the images live (e.g. a
             # cheap caching box) stays valid on the training machine that downloads it elsewhere.
             identity = (entry.path.parent.name, stem, entry.tags, entry.nl)
+            notes = annotations_for(entry, aug)
+            if notes is not None:   # MOSS captions/layout in use: their files (and the crop) are part of it
+                identity = identity + (notes.fingerprint(),)
             pool = digest((identity, caption_identity(aug), seed, "caption-slots-v2"))
             ordinal = occurrence.get(pool, 0)
             occurrence[pool] = ordinal + 1
@@ -202,7 +206,8 @@ class CaptionVariationCache:
                 ).fetchone()[0]
                 for slot in range(existing, count):
                     text = build_caption(
-                        entry.tags, entry.nl, aug, random.Random(digest((pool, slot)))
+                        entry.tags, entry.nl, aug, random.Random(digest((pool, slot))),
+                        annotations_for(entry, aug),
                     )
                     key = digest(text)
                     db.execute(

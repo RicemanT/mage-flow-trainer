@@ -31,6 +31,7 @@ def eval_caption_config(caption):
 class Evaluator:
     def __init__(self, cfg):
         from ..data.caption import build_caption
+        from ..data.moss_captions import annotations_for
         from ..data.dataset import MageFlowDataset
 
         self.cfg = cfg.eval
@@ -47,7 +48,8 @@ class Evaluator:
         self.indices = order
         self.captions = {
             i: build_caption(self.dataset.entries[i].tags, self.dataset.entries[i].nl,
-                             dataset_cfg.caption, random.Random(0))
+                             dataset_cfg.caption, random.Random(0),
+                             annotations_for(self.dataset.entries[i], dataset_cfg.caption))
             for i in order
         }
         self.last_step = None

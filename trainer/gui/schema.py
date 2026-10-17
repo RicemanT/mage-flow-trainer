@@ -424,12 +424,14 @@ SPEC: dict[str, Spec] = {
         "tags = .txt, nl = _nl.txt, tags_nl / nl_tags concatenate in that order, mixed draws per "
         "sample from the weights below.\n\nText embeddings are never cached, precisely so this can "
         "vary per epoch.",
-        lambda: F.ChoiceEditor(["tags", "nl", "tags_nl", "nl_tags", "mixed"])),
+        lambda: F.ChoiceEditor(["tags", "nl", "tags_nl", "nl_tags", "short", "medium", "long", "layout", "mixed"])),
     "dataset.caption.mixed_weights": _spec(
         "Mixed weights",
         "Relative weights, not percentages -- they need not sum to 100. Only used when the mode "
-        "is `mixed`.",
-        lambda: F.WeightsEditor(["tags", "nl", "tags_nl", "nl_tags"])),
+        "is `mixed`.\n\nshort / medium / long / layout come from MOSS-Image annotation files next to "
+        "each image (<stem>_moss.json, <stem>_layout.json, written by the MOSS captioning script); a "
+        "sample without them falls back to its NL caption, then its tags.",
+        lambda: F.WeightsEditor(["tags", "nl", "tags_nl", "nl_tags", "short", "medium", "long", "layout"])),
     "dataset.caption.shuffle_tags": _spec(
         "Shuffle tags", "Breaks positional memorisation of tag order.",
         lambda: F.BoolEditor("Shuffle tags"), inline_label=True),
@@ -468,6 +470,18 @@ SPEC: dict[str, Spec] = {
         "Take attribution entries out before tag dropout and shuffling, so a trigger is never "
         "dropped. Off treats them like any other tag.",
         lambda: F.BoolEditor("Attribution is never dropped"), inline_label=True),
+    "dataset.caption.keep_order_through_attribution": _spec(
+        "Keep tag order up to the artist",
+        "For MOSS-Image's tag order (quality, meta, year, character, series, @artist, general): every tag "
+        "up to and including the last attribution tag stays in place and is never dropped; shuffling and "
+        "dropout apply only to the general tags after it. Needs attribution patterns such as ^@.",
+        lambda: F.BoolEditor("Keep the ordered head, shuffle only general tags"), inline_label=True),
+    "dataset.caption.annotation_attribution_template": _spec(
+        "Artist in MOSS captions",
+        "How the artist (the caption's attribution tags) is added to the short / medium / long captions "
+        "and the layout summary, which never name the artist themselves. {attribution} and {caption}; "
+        "empty = leave the artist out.",
+        lambda: F.TextEditor("{attribution}. {caption}", strip=False)),
     "dataset.caption.attribution_dedupe_on_combine": _spec(
         "Dedupe attribution on tags+NL",
         "tags_nl / nl_tags join both fields, and datasets carry `Drawn by X` in both so it "
@@ -898,6 +912,8 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
             "dataset.caption.attribution_patterns", "dataset.caption.attribution_position",
             "dataset.caption.attribution_dropout_immune",
             "dataset.caption.attribution_dedupe_on_combine",
+            "dataset.caption.keep_order_through_attribution",
+            "dataset.caption.annotation_attribution_template",
         ]),
     ]),
     ("Training", [

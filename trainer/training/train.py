@@ -606,7 +606,9 @@ class Trainer:
         cfg = self.cfg
         if cfg.train.caption_variations:
             return self._build_variation_cache()
-        captions = sorted({build_caption(e.tags, e.nl, cfg.dataset.caption, random.Random(0))
+        from ..data.moss_captions import annotations_for
+        captions = sorted({build_caption(e.tags, e.nl, cfg.dataset.caption, random.Random(0),
+                                         annotations_for(e, cfg.dataset.caption))
                            for e in self.dataset.entries} | set(getattr(self, "aux_texts", ())))
         if not captions:
             raise ValueError("No captions available for text embedding caching")

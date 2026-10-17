@@ -112,6 +112,32 @@ export writes `protected_tags.txt` with every character and copyright tag in the
 - The path is not part of the caption cache key; the tags it holds are, so editing the file builds
   new caption slots.
 
+## MOSS-Image captions and layouts
+
+For MOSS-Image, the MageTrail captioning script writes MOSS's own caption format next to each image:
+`<stem>_moss.json` (captions at three lengths, watermark boxes, borders) and, for a share of images,
+`<stem>_layout.json` (a summary plus `character` / `object` / `text` items with boxes; text boxes from OCR).
+Boxes are `[y_min, x_min, y_max, x_max]` normalized to 0-1000 of the original image.
+
+- **Variants.** `caption_mode` and `mixed_weights` accept `short`, `medium`, `long` and `layout` next to
+  `tags`, `nl`, `tags_nl` and `nl_tags`. A sample without the file a variant needs falls back to its NL
+  caption, then to its tags. The files travel with the latent cache (they match `*.json`).
+- **Layouts per crop.** `layout` compiles the prompt MOSS-Image was trained on for each training crop: the
+  dataset scales an image to cover its bucket and centre-crops it, so boxes are moved into the bucket's
+  pixels, items mostly cut off by the crop are dropped (text needs 90% visible, other items 50%), and the
+  coordinates are written as `abs_centralized` / `yxyx` with MOSS's rounding. One file serves every
+  resolution. The layout variant needs the original image size, which latents carry in their metadata.
+- **The artist.** The annotation captions never name the artist. `annotation_attribution_template`
+  (default `"{attribution}. {caption}"`) adds the caption's attribution tags, e.g. `@foo bar`, to the
+  short / medium / long captions and to the layout's summary caption; `""` leaves the artist out.
+- **MOSS tag order.** MOSS recommends quality, meta, year, character, series, artist, general.
+  `keep_order_through_attribution = true` (with `attribution_patterns = ["^@"]`) keeps every tag up to and
+  including the last attribution tag in place and never drops them; shuffling and dropout apply only to the
+  general tags after it.
+- Weights left at 0 for the new variants are dropped from the config, so configs that do not use them keep
+  their caption-variation cache keys. When they are used, the annotation files and the crop are part of the
+  key, so editing a caption builds new slots.
+
 ## Kahan + AdaLN warning
 
 SDNQ's Kahan summation (`optimizer.use_kahan`) damages the shared AdaLN projection when AdaLN is trained. In
