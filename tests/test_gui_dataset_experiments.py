@@ -71,3 +71,31 @@ def test_subset_controls_have_room_at_small_window(gui):
     spin.setValue(999)
     assert gui.collect()["dataset.subsets"] == []
     assert spin.value() == 999
+
+
+def test_remove_subset_by_row_number(gui):
+    from PySide6 import QtCore, QtTest
+
+    subsets = gui.editors["dataset.subsets"]
+    subsets.set([{"path": "/first"}, {"path": "/middle"}, {"path": "/last"}])
+    gui.tab_bar.setCurrentIndex(next(i for i in range(gui.tab_bar.count())
+                                    if gui.tab_bar.tabText(i) == "Dataset"))
+    gui.show()
+    QtWidgets.QApplication.processEvents()
+    assert not subsets.del_btn.isEnabled()
+    subsets._remove_row()
+    assert len(subsets.get()) == 3  # No implicit removal of the last row.
+    header = subsets.table.verticalHeader()
+    point = QtCore.QPoint(header.width() // 2,
+                         header.sectionViewportPosition(1) + header.sectionSize(1) // 2)
+    QtTest.QTest.mouseClick(header.viewport(), QtCore.Qt.MouseButton.LeftButton,
+                           pos=point)
+    assert subsets.del_btn.isEnabled()
+    subsets.del_btn.click()
+    assert [row["path"] for row in subsets.get()] == ["/first", "/last"]
+    assert not subsets.del_btn.isEnabled()
+    subsets.table.selectAll()
+    assert subsets.del_btn.isEnabled()
+    subsets.del_btn.click()
+    assert subsets.get() == []
+    assert gui.editors["dataset.path"].widget.isEnabled()

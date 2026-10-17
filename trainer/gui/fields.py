@@ -783,14 +783,18 @@ class SubsetEditor(_Blockable):
 
         hint = make_label(
             "Add rows to use these folders instead of the single Dataset path above. "
-            "Remove all rows to restore the single folder. Each row has its own repeat count."
+            "Remove all rows to restore the single folder. Each row has its own repeat count. "
+            "Click a row number to select it, then Remove selected. Ctrl/Shift selects multiple rows."
         )
         hint.setWordWrap(True)
         lay.addWidget(hint)
 
         self.table = QtWidgets.QTableWidget(0, len(self._HEADERS))
         self.table.setHorizontalHeaderLabels(self._HEADERS)
-        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setVisible(True)
+        self.table.verticalHeader().setSectionsClickable(True)
+        self.table.verticalHeader().setMinimumWidth(36)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         head = self.table.horizontalHeader()
@@ -806,7 +810,8 @@ class SubsetEditor(_Blockable):
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(6)
         self.add_btn = make_btn("Add folder")
-        self.del_btn = make_btn("Remove")
+        self.del_btn = make_btn("Remove selected")
+        self.del_btn.setEnabled(False)
         self.clear_btn = make_btn("Clear")
         for b in (self.add_btn, self.del_btn, self.clear_btn):
             row.addWidget(b)
@@ -817,6 +822,7 @@ class SubsetEditor(_Blockable):
         self.add_btn.clicked.connect(self._add_row)
         self.del_btn.clicked.connect(self._remove_row)
         self.clear_btn.clicked.connect(self._clear)
+        self.table.itemSelectionChanged.connect(self._update_remove_button)
 
     def _make_row(self, path, num_repeats, texture, index):
         # A plain QLineEdit + button rather than a nested PathEditor. PathEditor is a QObject
@@ -887,12 +893,15 @@ class SubsetEditor(_Blockable):
         self._make_row("", 1, False, i)
         self._emit()
 
+    def _update_remove_button(self):
+        self.del_btn.setEnabled(bool(self.table.selectionModel().selectedRows()))
+
     def _remove_row(self):
-        rows = sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True)
-        if not rows:
-            rows = [self.table.rowCount() - 1] if self.table.rowCount() else []
+        rows = sorted((i.row() for i in self.table.selectionModel().selectedRows()), reverse=True)
         for r in rows:
             self.table.removeRow(r)
+        self.table.clearSelection()
+        self._update_remove_button()
         self._emit()
 
     def _clear(self):
