@@ -396,7 +396,7 @@ requires-dist = [
     { name = "pyside6", marker = "extra == 'gui'", specifier = ">=6.11.1" },
     { name = "safetensors" },
     { name = "scipy", marker = "extra == 'ot'" },
-    { name = "sdnq" },
+    { name = "sdnq", specifier = "==0.2.4" },
     { name = "sentencepiece" },
     { name = "setuptools" },
     { name = "toml" },
