@@ -1,0 +1,6 @@
+MOSS-Image architecture configuration and Qwen3.5 tokenizer assets
+Source: OpenMOSS/MOSS-Image, from the local MOSS-Image model package.
+Text architecture: Qwen3.5-9B; tokenizer includes MOSS's supplied chat template.
+License: Apache License 2.0; see LICENSE.
+Only configuration, tokenizer and template assets are included; no model weights.
+Configuration files were renamed to distinguish text and transformer architectures.

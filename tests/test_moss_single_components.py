@@ -212,3 +212,77 @@ def test_original_vae_cache_cli_stays_in_trainer(tmp_path, monkeypatch):
     assert not any(
         k == "comfy" or k.startswith(("comfy.", "comfy_kitchen")) for k in sys.modules
     )
+
+
+def test_moss_bundled_sources_and_explicit_precedence(tmp_path):
+    from trainer.modeling.moss_loader import ASSETS, component_config, text_sources
+
+    missing = tmp_path / "no-model-package"
+    encoder = tmp_path / "encoder.safetensors"
+    assert (
+        component_config(missing, "text_encoder") == ASSETS / "text_encoder_config.json"
+    )
+    assert (
+        component_config(missing, "transformer") == ASSETS / "transformer_config.json"
+    )
+    assert text_sources(missing, encoder) == (encoder, ASSETS)
+    explicit = tmp_path / "explicit-tokenizer"
+    assert text_sources(missing, encoder, explicit) == (encoder, explicit)
+    (missing / "text_encoder").mkdir(parents=True)
+    config = missing / "text_encoder/config.json"
+    config.write_text("{}")
+    (missing / "tokenizer").mkdir()
+    assert component_config(missing, "text_encoder") == config
+    assert text_sources(missing, encoder)[1] == missing / "tokenizer"
+
+
+def test_no_model_package_uses_bundled_text_config_and_tokenizer(tmp_path, monkeypatch):
+    from trainer.modeling import moss_text_loader
+    from trainer.modeling.loader import load_components
+    from trainer.modeling.moss_loader import ASSETS
+
+    encoder = tmp_path / "encoder.safetensors"
+    encoder.touch()
+    calls = []
+
+    def load(source, config, dtype):
+        calls.append((source, config))
+        return torch.nn.Linear(1, 1)
+
+    monkeypatch.setattr(moss_text_loader, "load_single_text_encoder", load)
+    components = load_components(
+        tmp_path / "missing",
+        model_family="moss_image",
+        text_encoder_path=encoder,
+        load_transformer=False,
+        load_vae=False,
+    )
+    assert calls == [(encoder, ASSETS / "text_encoder_config.json")]
+    prompt = components.tokenizer.apply_chat_template(
+        [{"role": "user", "content": "a cat"}],
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=True,
+    )
+    assert components.tokenizer(prompt, return_tensors="pt").input_ids.numel() > 0
+
+
+def test_bundled_transformer_config_fallback(tmp_path, monkeypatch):
+    from dataclasses import asdict
+
+    from trainer.modeling import moss_loader
+    from trainer.modeling.moss_image import MOSSImage, MOSSParams
+
+    params = MOSSParams(
+        dim=32, ffn_dim=48, num_heads=2, num_layers=1, text_dim=16, latent_channels=8
+    )
+    model = MOSSImage(params)
+    source = tmp_path / "transformer.safetensors"
+    save_file(model.state_dict(), source)
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    (assets / "transformer_config.json").write_text(json.dumps(asdict(params)))
+    monkeypatch.setattr(moss_loader, "ASSETS", assets)
+    actual = moss_loader.load_transformer(tmp_path / "missing", source, torch.float32)
+    for key, value in model.state_dict().items():
+        torch.testing.assert_close(value, actual.state_dict()[key], rtol=0, atol=0)

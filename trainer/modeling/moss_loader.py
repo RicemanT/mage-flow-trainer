@@ -10,6 +10,21 @@ from safetensors.torch import load_file
 from .moss_image import MOSSImage, MOSSParams
 
 TEXT_TEMPLATE_VERSION = "moss-chat-thinking-v1"
+ASSETS = Path(__file__).with_name("assets") / "moss_image"
+
+
+def component_config(root, component):
+    local = Path(root) / component / "config.json"
+    return local if local.is_file() else ASSETS / f"{component}_config.json"
+
+
+def text_sources(root, text_encoder_path=None, tokenizer_path=None):
+    root = Path(root)
+    encoder = Path(text_encoder_path) if text_encoder_path else root / "text_encoder"
+    tokenizer = Path(tokenizer_path) if tokenizer_path else root / "tokenizer"
+    if not tokenizer_path and not tokenizer.is_dir():
+        tokenizer = ASSETS
+    return encoder, tokenizer
 
 
 def weight_files(source):
@@ -31,7 +46,9 @@ def weight_files(source):
 
 def load_transformer(root, source, dtype):
     root = Path(root)
-    config = json.loads((root / "transformer/config.json").read_text())
+    config = json.loads(
+        component_config(root, "transformer").read_text(encoding="utf-8")
+    )
     params = MOSSParams(
         **{f.name: config[f.name] for f in fields(MOSSParams) if f.name in config}
     )

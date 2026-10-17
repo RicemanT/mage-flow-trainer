@@ -76,4 +76,4 @@ build-backend = "setuptools.build_meta"
 include = ["trainer*"]
 
 [tool.setuptools.package-data]
-trainer = ["modeling/LICENSE.*", "modeling/modules/LICENSE.*", "modeling/assets/*.json", "modeling/assets/qwen3vl4b/*", "gui/LICENSE.*"]
+trainer = ["modeling/LICENSE.*", "modeling/modules/LICENSE.*", "modeling/assets/*.json", "modeling/assets/qwen3vl4b/*", "modeling/assets/moss_image/*", "gui/LICENSE.*"]

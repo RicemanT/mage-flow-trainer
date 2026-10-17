@@ -18,7 +18,8 @@ below remain the original 512px tests. Set the dataset path and
 `train.model_path` to a local package containing `transformer/`, `text_encoder/`,
 `tokenizer/`, and `vae/`. Native single-file and sharded safetensors transformers
 are accepted. `train.transformer_path` can override the transformer; the package
-still supplies its architecture configuration. Fused-qkv and prequantized
+supplies its architecture configuration when present; otherwise the bundled
+standard MOSS-Image configuration is used. Fused-qkv and prequantized
 inference exports are not accepted as training sources.
 
 Separate components are also supported through the GUI's text encoder and VAE
@@ -26,8 +27,13 @@ file fields or `train.text_encoder_path` and `train.vae_path`:
 
 - Qwen3.5 text encoders accept local Hugging Face directories or single-file
   BF16/FP32 and Comfy INT8 `int8_tensorwise` safetensors, including ConvRot.
-  Single files use `model_path/text_encoder/config.json` and the package tokenizer
-  (or `train.tokenizer_path`). The text-only model omits vision, generation-head,
+  Single files use `model_path/text_encoder/config.json` when present, otherwise
+  the bundled Qwen3.5-9B configuration. The tokenizer defaults to the package's
+  `tokenizer/` or the bundled MOSS tokenizer and chat template; an explicit
+  `train.tokenizer_path` takes precedence. Thus separate standard MOSS transformer,
+  text encoder and VAE files do not require a downloaded model package. Select
+  `model_family = "moss_image"` when no package is provided.
+  The text-only model omits vision, generation-head,
   and multi-token prediction weights. INT8 weights are dequantized and ConvRot
   is reversed in FP32, then stored in the requested training dtype. This is
   **not INT8 execution**: BF16 text weights occupy approximately 15 GiB. Optional

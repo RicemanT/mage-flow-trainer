@@ -141,13 +141,13 @@ def load_components(
     encoder = tokenizer = vae = None
     encoder_source, tokenizer_source = text_sources(path, text_encoder_path, tokenizer_path)
     if family == 'moss_image':
-        encoder_source = Path(text_encoder_path) if text_encoder_path else path / 'text_encoder'
-        tokenizer_source = Path(tokenizer_path) if tokenizer_path else path / 'tokenizer'
+        from .moss_loader import component_config, text_sources as moss_text_sources
+        encoder_source, tokenizer_source = moss_text_sources(path, text_encoder_path, tokenizer_path)
     if load_text_encoder and family == 'moss_image':
         from transformers import AutoModel
         if encoder_source.is_file():
             from .moss_text_loader import load_single_text_encoder
-            encoder = load_single_text_encoder(encoder_source, path / 'text_encoder/config.json', dtype)
+            encoder = load_single_text_encoder(encoder_source, component_config(path, 'text_encoder'), dtype)
         else:
             encoder = AutoModel.from_pretrained(encoder_source, torch_dtype=dtype,
                                                attn_implementation='sdpa', local_files_only=True)

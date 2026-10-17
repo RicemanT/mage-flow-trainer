@@ -69,7 +69,7 @@ def load_single_text_encoder(source, config_source, dtype):
     from accelerate import init_empty_weights
     from transformers import Qwen3_5TextConfig, Qwen3_5TextModel
 
-    data = json.loads(Path(config_source).read_text())
+    data = json.loads(Path(config_source).read_text(encoding="utf-8"))
     config = Qwen3_5TextConfig(**data.get("text_config", data))
     config._attn_implementation = "sdpa"
     with init_empty_weights():

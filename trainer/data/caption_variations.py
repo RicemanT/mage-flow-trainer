@@ -29,13 +29,13 @@ def _encoder_fingerprint_payload(cfg):
         from ..modeling.loader import ASSETS, text_sources
 
         if getattr(cfg.train, 'model_family', None) == 'moss_image':
-            sources = [Path(getattr(cfg.train, 'text_encoder_path', None) or root / 'text_encoder'),
-                       Path(getattr(cfg.train, 'tokenizer_path', None) or root / 'tokenizer')]
+            from ..modeling.moss_loader import component_config, text_sources as moss_text_sources
+            sources = list(moss_text_sources(root, cfg.train.text_encoder_path, cfg.train.tokenizer_path))
         else:
             sources = list(text_sources(root, getattr(cfg.train, "text_encoder_path", None),
                                         getattr(cfg.train, "tokenizer_path", None)))
         if sources[0].is_file():
-            sources.append(root / "text_encoder/config.json" if getattr(cfg.train, "model_family", None) == "moss_image"
+            sources.append(component_config(root, 'text_encoder') if getattr(cfg.train, "model_family", None) == "moss_image"
                            else ASSETS / "qwen3vl4b/config.json")
     else:
         # Preserve existing cache keys for the original directory loading method.
