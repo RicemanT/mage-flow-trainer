@@ -19,8 +19,9 @@ below remain the original 512px tests. Set the dataset path and
 `tokenizer/`, and `vae/`. Native single-file and sharded safetensors transformers
 are accepted. `train.transformer_path` can override the transformer; the package
 supplies its architecture configuration when present; otherwise the bundled
-standard MOSS-Image configuration is used. Fused-qkv and prequantized
-inference exports are not accepted as training sources.
+standard MOSS-Image configuration is used. Unquantized ComfyUI exports with fused
+Q/K/V weights are split losslessly into native training tensors during loading.
+Prequantized transformer exports are not accepted as training sources.
 
 Separate components are also supported through the GUI's text encoder and VAE
 file fields or `train.text_encoder_path` and `train.vae_path`:

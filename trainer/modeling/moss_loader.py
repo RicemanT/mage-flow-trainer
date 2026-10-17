@@ -68,10 +68,25 @@ def load_transformer(root, source, dtype):
         v.is_floating_point() is False or v.element_size() < 2 for v in state.values()
     ):
         raise ValueError("Load unquantized MOSS weights, then apply SDNQ")
-    if "layers.0.proj.qkv.weight" in state:
-        raise ValueError(
-            "Use native separate-q/k/v MOSS weights, not a fused inference export"
-        )
+    # ComfyUI BF16 exports concatenate Q, K, V along the output dimension.
+    # Text-refiner qkv tensors are already native and must remain fused.
+    converted = 0
+    for i in range(params.num_layers):
+        prefix = f"layers.{i}.proj."
+        key = prefix + "qkv.weight"
+        if key not in state:
+            continue
+        weight = state.pop(key)
+        if tuple(weight.shape) != (3 * params.dim, params.dim):
+            raise ValueError(f"{key}: expected {(3 * params.dim, params.dim)}, got {tuple(weight.shape)}")
+        for name, part in zip(("q", "k", "v"), weight.chunk(3, dim=0)):
+            target = prefix + name + ".weight"
+            if target in state:
+                raise ValueError(f"Ambiguous MOSS checkpoint: both {key} and {target}")
+            state[target] = part.clone()
+        converted += 1
+    if converted:
+        print(f"MOSS transformer: split fused Q/K/V weights in {converted} blocks into native training tensors")
     # ComfyUI exports may omit this derived constant.
     if "rope.bands" not in state:
         state["rope.bands"] = model.rope._default_bands(torch.device("cpu"))

@@ -223,3 +223,34 @@ def test_adapter_backward_without_modulation(kind, algo):
     assert all(
         not p.requires_grad for n, p in model.named_parameters() if "modulation" in n
     )
+
+
+def test_fused_export_loads_exact_native_weights(tmp_path):
+    import json
+    from safetensors.torch import save_file
+    from trainer.modeling.moss_loader import load_transformer
+
+    model = tiny()
+    folder = tmp_path / 'transformer'
+    folder.mkdir()
+    (folder / 'config.json').write_text(json.dumps(asdict(model.params)))
+    state = dict(model.state_dict())
+    for i in range(model.params.num_layers):
+        prefix = f'layers.{i}.proj.'
+        state[prefix + 'qkv.weight'] = torch.cat([
+            state.pop(prefix + name + '.weight') for name in ('q', 'k', 'v')
+        ])
+    source = tmp_path / 'fused.safetensors'
+    save_file({'model.diffusion_model.' + k: v for k, v in state.items()}, source)
+    loaded = load_transformer(tmp_path, source, torch.float32)
+    for key, value in model.state_dict().items():
+        torch.testing.assert_close(loaded.state_dict()[key], value, rtol=0, atol=0)
+    state['layers.0.proj.q.weight'] = model.layers[0].proj['q'].weight
+    save_file(state, source)
+    with pytest.raises(ValueError, match='Ambiguous MOSS checkpoint'):
+        load_transformer(tmp_path, source, torch.float32)
+    del state['layers.0.proj.q.weight']
+    state['layers.0.proj.qkv.weight'] = state['layers.0.proj.qkv.weight'][:-1].clone()
+    save_file(state, source)
+    with pytest.raises(ValueError, match='expected'):
+        load_transformer(tmp_path, source, torch.float32)

@@ -35,7 +35,20 @@ def read_weight(reader, key, dtype):
         return value.to(dtype)
     conf = json.loads(bytes(reader.get_tensor(quant_key).tolist()).decode("utf-8"))
     if conf.get("format") != "int8_tensorwise":
-        raise ValueError(f"{key}: unsupported quantization format {conf.get('format')}")
+        fmt = conf.get("format")
+        low_bit = fmt in {"asym_w4a8_int8", "convrot_w4a4", "nvfp4", "fp4", "int4"}
+        detail = (
+            " This is a 4-bit weight format (even if its name contains 'int8')."
+            " Four-bit quantization can alter caption embeddings more than INT8;"
+            " converting it to BF16 cannot recover the discarded precision."
+            if low_bit else ""
+        )
+        raise ValueError(
+            f"MOSS text encoder: unsupported quantization format {fmt!r} at {key}."
+            f"{detail} Set train.text_encoder_path to Qwen3.5-9B BF16/FP16 weights"
+            " or an int8_tensorwise checkpoint (ConvRot is supported)."
+            " This concerns the text encoder, not the transformer."
+        )
     view = reader.get_slice(key)
     shape = view.get_shape()
     if view.get_dtype() != "I8" or len(shape) != 2:
