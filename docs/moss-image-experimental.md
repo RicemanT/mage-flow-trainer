@@ -50,6 +50,10 @@ its 9B encoder adds substantial VRAM; start with caching.
 
 SDPA and PyTorch varlen attention support mixed resolutions and caption lengths.
 Checkpointing and regional compile cover text-refinement and joint blocks.
+MOSS compilation disables Inductor's mixed-order reduction fusion: at longer
+packed sequence lengths its fused RMSNorm backward kernel can exceed the RTX
+4090's per-block shared-memory limit (`No valid triton configs`). Compilation
+and varlen remain enabled; this workaround does not change the loss or precision.
 The transformer converts the trainer's normalized timestep to the native
 0–1000 sinusoid input; RoPE frequencies remain FP32 after BF16 conversion.
 

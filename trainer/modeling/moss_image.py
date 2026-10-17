@@ -237,18 +237,25 @@ class MOSSImage(nn.Module):
             )
         self.checkpointing = gradient_checkpointing
         self.attention_backend = attention_backend
+        compile_options = None
+        if compile_mode is not None:
+            compile_options = dict(torch._inductor.list_mode_options(compile_mode))
+            # MOSS RMSNorm backward at longer packed sequence lengths can produce
+            # mixed-order reduction kernels exceeding Ada's shared-memory limit.
+            # Keep other compilation optimizations, using separate reductions.
+            compile_options["triton.mix_order_reduction"] = False
         self.block_forward = (
             _Block.forward
             if compile_mode is None
             else torch.compile(
-                _Block.forward, mode=compile_mode, dynamic=compile_dynamic
+                _Block.forward, options=compile_options, dynamic=compile_dynamic
             )
         )
         self.text_forward = (
             _TextBlock.forward
             if compile_mode is None
             else torch.compile(
-                _TextBlock.forward, mode=compile_mode, dynamic=compile_dynamic
+                _TextBlock.forward, options=compile_options, dynamic=compile_dynamic
             )
         )
 

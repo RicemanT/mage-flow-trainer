@@ -112,6 +112,13 @@ smoke tests do not establish image quality or memory needs for longer captions.
 
 For a fresh environment, use `./install.sh` or `install.bat`. The tested environment uses PyTorch 2.10.0 + CUDA 12.8; dependencies are recorded in `uv.lock` and `requirements.txt`.
 
+SDNQ is pinned to **0.2.4**, the version used to validate the trainer's optimizer
+defaults and compatibility patches. Newer releases require separate validation.
+If an existing environment installed a different release, activate that environment
+and run `python -m pip install "sdnq==0.2.4" --no-deps`, then restart the trainer.
+Check the installed version with
+`python -c "from importlib.metadata import version; print(version('sdnq'))"`.
+
 ### GUI
 
 <a href="docs/images/trainer-gui.png"><img src="docs/images/trainer-gui.png" alt="Mage-Flow Trainer GUI showing model selection, batching, compilation, checkpoints, and training controls" width="960"></a>

@@ -106,6 +106,22 @@ def test_packed_checkpoint_isolation(monkeypatch):
     assert model.bfloat16().rope.bands.dtype == torch.float32
 
 
+@pytest.mark.parametrize("mode", ["default", "reduce-overhead", "max-autotune"])
+def test_compile_keeps_mode_options_with_safe_reductions(monkeypatch, mode):
+    calls = []
+
+    def compile_stub(fn, **kwargs):
+        calls.append(kwargs)
+        return fn
+
+    monkeypatch.setattr(torch, "compile", compile_stub)
+    model = tiny()
+    model.configure_execution(compile_mode=mode, attention_backend="torch_varlen")
+    expected = dict(torch._inductor.list_mode_options(mode))
+    expected["triton.mix_order_reduction"] = False
+    assert calls == [{"options": expected, "dynamic": True}] * 2
+
+
 def test_training_targets():
     model = tiny()
     report = build_param_groups(model, ComponentLRs(), 1e-5)
