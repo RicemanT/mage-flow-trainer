@@ -120,6 +120,15 @@ The GUI uses the same TOML configuration and training backend as the CLI. Launch
 4. Enable **Cache text embeddings** and set **Caption variations per image** above zero for augmented caching. Choose caption augmentation settings before starting; the trainer prepares missing embeddings automatically.
 5. Select the GPU(s), check batch size and training duration, and click **Start Training**. Multi-GPU training is available on Linux; Windows uses one selected GPU. The GUI displays progress and logs, and **Save / Save As** writes a TOML config you can also run from the CLI.
 
+Adding dataset subset rows disables the single dataset folder and its repeat count;
+remove all rows to restore them. Subsets replace the single-folder source.
+
+**Enable advanced experimental features** reveals an Experimental tab for Self-Flow,
+dual-timestep noising, RTI (Region Token Interface), decoded perceptual/eye LPIPS
+supervision, and eye adversarial loss. Revealing the tab does not activate a loss.
+Configs with an active experiment reveal it automatically; disable those features
+before hiding the tab. This visibility toggle does not change saved training settings.
+
 ### Compiled Loaded Text Encoder
 
 Qwen3 compilation is independent of Mage-Flow compilation and quantization.

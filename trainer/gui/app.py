@@ -233,6 +233,14 @@ class TrainingGUI(QtWidgets.QWidget):
         nav_lay.addWidget(make_btn("Reload", self._reload))
         main.addWidget(nav, 0)
 
+        self.experimental_chk = QtWidgets.QCheckBox("Enable advanced experimental features")
+        self.experimental_chk.setToolTip(
+            "Show Self-Flow, dual timestep, RTI, decoded perceptual and eye adversarial controls. "
+            "Individual features remain off until enabled. Active features must be disabled "
+            "before hiding their controls."
+        )
+        main.addWidget(self.experimental_chk, 0)
+
         frame = QtWidgets.QFrame()
         set_role(frame, "mainFrame")
         frame_lay = QtWidgets.QVBoxLayout(frame)
@@ -240,9 +248,24 @@ class TrainingGUI(QtWidgets.QWidget):
         self.stack = QtWidgets.QStackedWidget()
         frame_lay.addWidget(self.stack, 1)
 
+        experimental_groups = []
         for title, groups in LAYOUT:
+            regular_groups = []
+            for group_title, keys in groups:
+                if group_title.startswith("Experimental "):
+                    experimental_groups.append((group_title, keys))
+                    continue
+                dual = [k for k in keys if k.startswith("flow.dual_timestep")]
+                if dual:
+                    experimental_groups.append(("Dual timestep noising", dual))
+                regular_groups.append((group_title, [k for k in keys if k not in dual]))
             self.tab_bar.addTab(title)
-            self.stack.addWidget(self._build_page(groups))
+            self.stack.addWidget(self._build_page(regular_groups))
+
+        self.experimental_tab = self.tab_bar.addTab("Experimental")
+        self.stack.addWidget(self._build_page(experimental_groups))
+        self.tab_bar.setTabVisible(self.experimental_tab, False)
+        self.experimental_chk.toggled.connect(self._show_experimental)
 
         self.metrics = LiveMetricsWidget()
         self.tab_bar.addTab("Live Metrics")
@@ -259,6 +282,11 @@ class TrainingGUI(QtWidgets.QWidget):
         self.tab_bar.currentChanged.connect(self.stack.setCurrentIndex)
         main.addWidget(frame, 1)
         main.addWidget(self._build_footer(), 0)
+
+    def _show_experimental(self, enabled):
+        if not enabled and self.tab_bar.currentIndex() == self.experimental_tab:
+            self.tab_bar.setCurrentIndex(0)
+        self.tab_bar.setTabVisible(self.experimental_tab, enabled)
 
     def _build_page(self, groups):
         page = QtWidgets.QWidget()
@@ -309,7 +337,13 @@ class TrainingGUI(QtWidgets.QWidget):
         editor.changed.connect(self._on_edit)
         editor.widget.setToolTip(spec.tooltip)
         self.editors[key] = editor
-        if spec.inline_label:
+        if key == "dataset.subsets":
+            label = QtWidgets.QLabel(spec.label)
+            label.setToolTip(spec.tooltip)
+            form.addRow(label)
+            form.addRow(editor.widget)
+            self.rows[key] = (label, editor.widget)
+        elif spec.inline_label:
             form.addRow(editor.widget)
             self.rows[key] = (editor.widget,)
         else:
@@ -543,8 +577,13 @@ class TrainingGUI(QtWidgets.QWidget):
         self._refresh()
 
     def collect(self) -> dict:
-        return {**getattr(self, "_cli_values", {}),
+        flat = {**getattr(self, "_cli_values", {}),
                 **{key: editor.get() for key, editor in self.editors.items()}}
+        if self.editors["dataset.subsets"].table.rowCount():
+            # Even an unfinished subset row switches away from the single-folder
+            # source. Do not accidentally launch on the old, now-disabled folder.
+            flat["dataset.path"] = None
+        return flat
 
     def _managed_target(self, flat: dict) -> Path:
         """Where a Save/Start should land: `configs/<run_name>.toml`.
@@ -662,6 +701,20 @@ class TrainingGUI(QtWidgets.QWidget):
 
     def _refresh(self):
         flat = self.collect()
+        has_subsets = self.editors["dataset.subsets"].table.rowCount() > 0
+        for key in ("dataset.path", "dataset.num_repeats"):
+            self.editors[key].set_enabled(not has_subsets)
+            for widget in self.rows[key]:
+                widget.setEnabled(not has_subsets)
+        # Never hide an enabled experiment loaded from a TOML. Visibility is a UI
+        # preference; it must not silently mutate or conceal the training config.
+        active_experiment = any(flat.get(k) for k in (
+            "self_flow.enabled", "flow.dual_timestep", "rti.enabled",
+            "perceptual.enabled", "adversarial.enabled",
+        ))
+        if active_experiment:
+            self.experimental_chk.setChecked(True)
+        self.experimental_chk.setEnabled(not active_experiment)
         for key, rule in _RULES.items():
             editor = self.editors.get(key)
             if editor is None:

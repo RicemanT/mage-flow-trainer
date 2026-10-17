@@ -233,11 +233,11 @@ SPEC: dict[str, Spec] = {
     "dataset.path": _spec(
         "Dataset directory",
         "Images with .txt (tags) and optional _nl.txt (natural language) sidecars, or cached "
-        "latents named <stem>_WWWWxHHHH_trainer.safetensors.\n\nIgnored once Extra subsets below has "
+        "latents named <stem>_WWWWxHHHH_trainer.safetensors.\n\nDisabled once Dataset subsets below has "
         "any rows -- the two forms are mutually exclusive and the subset list wins.",
         lambda: F.PathEditor("folder")),
     "dataset.subsets": _spec(
-        "Extra subsets",
+        "Dataset subsets",
         "Train from several folders, each with its own repeat count and texture eligibility. "
         "Leave empty for the ordinary single-directory config above.\n\nThe Texture crops column "
         "is the reason this exists: unchecked keeps a folder in full resolution for the whole run "
