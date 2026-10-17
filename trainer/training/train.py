@@ -676,7 +676,7 @@ class Trainer:
 
         pred = self.transformer(
             hidden_states=noisy.to(self.dtype),
-            timestep=timesteps.to(self.dtype),
+            timestep=self._conditioning_timesteps(timesteps),
             encoder_hidden_states=encoder_hidden_states,
             return_dict=False,
             **({"second_timestep": second_t.to(self.dtype), "timestep_mask": token_mask}
@@ -708,6 +708,12 @@ class Trainer:
             self.hf_patch, self.cfg.flow.hf_exponent, mask=mask, **self.cfg.flow.hf_gate_kwargs()
         )
         return loss + hf, hf
+
+    def _conditioning_timesteps(self, timesteps):
+        # MOSS scales normalized sigma by 1000 before computing sinusoids.
+        # BF16 rounding here would condition on a different time than noising.
+        dtype = torch.float32 if self.cfg.train.model_family == "moss_image" else self.dtype
+        return timesteps.to(dtype)
 
     def _step_self_flow(self, batch):
         from .self_flow import forward_probe
@@ -772,7 +778,7 @@ class Trainer:
             self.eye_micro += 1
         context = self._encode(captions)
         predictions = self.transformer(hidden_states=[x.to(self.dtype) for x in noisy],
-            timestep=torch.cat(times).to(self.dtype), encoder_hidden_states=context,
+            timestep=self._conditioning_timesteps(torch.cat(times)), encoder_hidden_states=context,
             **({"second_timestep": torch.cat(second_times).to(self.dtype),
                 "timestep_mask": token_masks} if self.cfg.flow.dual_timestep else {}),
             **({"keep_fraction": self.keep_fraction} if self.rti_interface is not None else {}))[0]
