@@ -39,6 +39,9 @@ from ..training.config import (
     RTIConfig,
     SamplingConfig,
     SelfFlowConfig,
+    PerceptualConfig,
+    EyeAdversarialConfig,
+    PairedTextureConfig,
     ScheduleConfig,
     TrackingConfig,
     TrainConfig,
@@ -64,6 +67,9 @@ SECTIONS: dict[str, type] = {
     "tracking": TrackingConfig,
     "sampling": SamplingConfig,
     "eval": EvalConfig,
+    "perceptual": PerceptualConfig,
+    "adversarial": EyeAdversarialConfig,
+    "paired_texture": PairedTextureConfig,
 }
 
 # Fields that exist on a dataclass but are not config keys in their own section -- they are
@@ -361,6 +367,11 @@ def advisories(flat: dict, num_processes: int = 1) -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     tex = _texture_phases(flat)
     n = max(1, int(num_processes))
+
+    from ..training.config import KAHAN_ADALN_WARNING, kahan_adaln_risk
+    if kahan_adaln_risk(flat.get("optimizer.kind", "adamw"), flat.get("optimizer.use_kahan"),
+                        flat.get("adapter.kind", "none"), flat.get("component_lr.adaln")):
+        out.append(("warn", KAHAN_ADALN_WARNING))
 
     if (flat.get("optimizer.kind") == "adafactor"
             and flat.get("optimizer.norm_mode") in (None, "relative")

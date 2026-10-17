@@ -62,3 +62,22 @@ benchmarks/readme-vram/
 remote_jobs/
 configs/remote/
 .gui_remote.json
+# Local experiments, downloaded weights/packages, and reference archives.
+benchmarks/
+models/
+flux3/
+the-trainer-copy/
+the-trainer-copy.zip
+testD_vpred.log
+klein-4b-config.json
+cache-instant-nl-2gpu.py
+# Public experimental template; keep the local machine-specific finetune config private.
+!configs/flux3-locon-experimental.toml
+/configs/mageflow-finetune.toml
+
+!configs/flux3-finetune-experimental.toml
+
+# Local MOSS weights and upstream reference checkout
+/moss-image/
+/MOSS-Image/
+!configs/moss-image-*-experimental.toml

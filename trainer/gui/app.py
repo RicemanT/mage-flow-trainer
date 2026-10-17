@@ -82,6 +82,14 @@ def detect_gpus() -> list[tuple[int, str]]:
 # Controls that exist but would do nothing in the current combination. Each entry is
 # key -> predicate(flat_config) -> enabled.
 _RULES = {
+    **{f'paired_texture.{option}': (lambda c: float(c.get('paired_texture.scale') or 0) > 0) for option in (
+        'levels', 'patch', 'tokens', 'features', 'seed', 'snr_cut', 'min_gate')},
+    **{f'flow.{option}': (lambda c: float(c.get('flow.hf_scale') or 0) > 0) for option in (
+        'hf_high_noise_snr_cut', 'hf_high_noise_min_weight', 'hf_high_noise_power')},
+    **{f'adversarial.{option}': (lambda c: bool(c.get('adversarial.enabled'))) for option in (
+        'weight', 'discriminator_lr', 'warm_start')},
+    **{f'perceptual.{option}': (lambda c: bool(c.get('perceptual.enabled'))) for option in (
+        'weight', 'max_t', 'every', 'cache_dir', 'eye_manifest', 'dedicated_low_noise')},
     **{f'self_flow.{option}': (lambda c: bool(c.get('self_flow.enabled'))) for option in (
         'ema_dtype', 'ema_device', 'adaln_fp32', 'stochastic_rounding', 'decay', 'weight')},
     # Measured: under `uniform`, scale 0.5/1.0/2.0 give byte-identical distributions.

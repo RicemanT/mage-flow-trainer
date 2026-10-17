@@ -53,6 +53,9 @@ class FlowConfig:
     # feature not existing -- the term is gated in Python, allocates nothing, and draws no RNG.
     hf_scale: float = 0.0            # lambda
     hf_exponent: float = 1.0         # gamma; >1 concentrates on the highest-detail tokens
+    hf_high_noise_snr_cut: float = 1.0 / 9.0
+    hf_high_noise_min_weight: float = 0.1
+    hf_high_noise_power: float = 1.0
 
     def __post_init__(self):
         if not 0 < self.dual_timestep_mask_ratio <= 0.5:
@@ -99,10 +102,19 @@ class FlowConfig:
                     "`uv sync --extra ot`, or set use_ot = false. (Without it the noise pairing "
                     "would fall back to the identity permutation and do nothing.)"
                 )
-        if self.hf_scale < 0.0:
+        if not math.isfinite(self.hf_scale) or self.hf_scale < 0.0:
             raise ValueError(f"flow.hf_scale must be >= 0, got {self.hf_scale}")
-        if self.hf_exponent <= 0.0:
+        if not math.isfinite(self.hf_exponent) or self.hf_exponent <= 0.0:
             raise ValueError(f"flow.hf_exponent must be > 0, got {self.hf_exponent}")
+        for name in ('hf_high_noise_snr_cut', 'hf_high_noise_power'):
+            if not math.isfinite(getattr(self,name)) or getattr(self,name) <= 0:
+                raise ValueError(f'flow.{name} must be finite and positive')
+        if not math.isfinite(self.hf_high_noise_min_weight) or not 0 <= self.hf_high_noise_min_weight <= 1:
+            raise ValueError('flow.hf_high_noise_min_weight must be in [0, 1]')
+
+    def hf_gate_kwargs(self):
+        return dict(snr_cut=self.hf_high_noise_snr_cut,
+                    min_gate=self.hf_high_noise_min_weight, power=self.hf_high_noise_power)
 
 
 def _draw(cfg: FlowConfig, n: int, latent_h: int, latent_w: int, device) -> torch.Tensor:
@@ -369,6 +381,13 @@ def hf_token_weights(
     return raw / raw.mean(dim=-1, keepdim=True)
 
 
+def hf_snr_gate(timesteps, snr_cut=1.0/9.0, min_gate=0.1, power=1.0):
+    """HF-only high-noise attenuation; preserves scalar or spatial timestep shape."""
+    t = timesteps.detach().float().clamp(0,1)
+    snr = ((1-t)/t.clamp_min(1e-6)).square()
+    return (snr/snr_cut).clamp(max=1).pow(power).clamp(min=min_gate,max=1)
+
+
 def hf_loss(
     model_pred: torch.Tensor,
     noisy: torch.Tensor,
@@ -377,6 +396,10 @@ def hf_loss(
     patch: int,
     exponent: float,
     mask: torch.Tensor | None = None,
+    *,
+    snr_cut: float | None = None,
+    min_gate: float = 0.1,
+    power: float = 1.0,
 ) -> torch.Tensor:
     """Detail-weighted MSE on the *predicted clean estimate*, for 5D (B,C,T,H,W) latents with T=1.
 
@@ -387,7 +410,9 @@ def hf_loss(
     v_target||^2` elementwise, and content weighting is only meaningful on the clean estimate --
     at low t the velocity target is noise-dominated and "which token has detail" says nothing
     about it. The t^2 factor makes the term weak at small t; that is accepted, not compensated,
-    and no timestep gate is applied.
+    A supplied SNR gate attenuates high-noise tokens without renormalizing it away.
+    Direct callers can omit snr_cut for the historical ungated result; the trainer
+    passes its configured gate (default cutoff 1/9, floor 0.1, power 1).
     """
     b, c, t_dim, h, w = clean.shape
     if t_dim != 1:
@@ -395,11 +420,11 @@ def hf_loss(
     if h % patch or w % patch:
         raise ValueError(f"latent {h}x{w} is not divisible by the patch size {patch}")
 
-    clean = clean.reshape(b, c, h, w).float()
-    times = timesteps.float()
+    clean = clean.detach().reshape(b, c, h, w).float()
+    times = timesteps.detach().float()
     if times.ndim == 1:
         times = times.view(-1, 1, 1, 1, 1)
-    x0_pred = noisy.float() - times * model_pred.float()
+    x0_pred = noisy.detach().float() - times * model_pred.float()
     x0_pred = x0_pred.reshape(b, c, h, w)
 
     # `clean` is data and carries no grad, so the weights are already constant; detach anyway so a
@@ -408,6 +433,11 @@ def hf_loss(
         w_tok = hf_token_weights(clean, patch, exponent)
 
     per_token = _tokenize(x0_pred - clean, patch).square().mean(dim=-1)
+    if snr_cut is not None and min_gate != 1.0:
+        # A spatial map is needed for dual-timestep noising. Pool over the same
+        # model token as the residual; Mage-Flow's token patch size is one.
+        gate = hf_snr_gate(times, snr_cut, min_gate, power).expand(b,1,1,h,w)
+        per_token = per_token * _tokenize(gate.reshape(b,1,h,w),patch).mean(dim=-1)
 
     if mask is None:
         return (w_tok * per_token).mean(dim=-1).mean()

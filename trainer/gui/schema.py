@@ -33,6 +33,29 @@ def _spec(label, tooltip, make, inline_label=False):
 
 
 SPEC: dict[str, Spec] = {
+    'flow.hf_high_noise_snr_cut': _spec('HF high-noise SNR cutoff', 'HF-only attenuation below this SNR. 1/9 corresponds to noise timestep 0.75.', lambda: F.FloatEditor(1e-12, 1e6, step=.01, decimals=12)),
+    'flow.hf_high_noise_min_weight': _spec('HF minimum gate', 'Floor for the HF high-noise gate. Set 1 to recover the previous ungated HF loss.', lambda: F.FloatEditor(0, 1, step=.05, decimals=6)),
+    'flow.hf_high_noise_power': _spec('HF gate power', 'Exponent on the high-noise SNR ratio. Leaves the ordinary flow loss unchanged.', lambda: F.FloatEditor(1e-6, 100, step=.1, decimals=6)),
+    'paired_texture.scale': _spec('Paired texture loss scale', 'Experimental latent patch-distribution loss. Zero disables all work; no decoder or extra model forward.', lambda: F.FloatEditor(0, 100, step=.01, decimals=8)),
+    'paired_texture.levels': _spec('Detail pyramid levels', 'Gaussian reduction and Laplacian detail bands; omits the coarse residual.', lambda: F.IntEditor(1, 32)),
+    'paired_texture.patch': _spec('Local patch size', 'Odd patch width in latent pixels, independent of transformer token size.', lambda: F.IntEditor(1, 255, 2)),
+    'paired_texture.tokens': _spec('Sampled patches per level', 'Reproducible sampling without replacement; preserves signed patch values.', lambda: F.IntEditor(1, 1048576)),
+    'paired_texture.features': _spec('Fourier frequencies', 'Number of fixed random frequencies at three bandwidths.', lambda: F.IntEditor(1, 65536)),
+    'paired_texture.seed': _spec('Texture projection seed', 'Local RNG only; does not advance training noise RNG.', lambda: F.OptIntEditor('1729')),
+    'paired_texture.snr_cut': _spec('Texture SNR cutoff', 'Attenuate texture loss at high noise independently of the HF gate.', lambda: F.FloatEditor(1e-12, 1e6, step=.01, decimals=12)),
+    'paired_texture.min_gate': _spec('Texture minimum gate', 'Zero removes the texture term at pure noise. No batch normalization of the gate.', lambda: F.FloatEditor(0, 1, step=.05, decimals=6)),
+    'adversarial.enabled': _spec('Enable eye discriminator', 'Experimental. Requires dedicated low-noise eye examples and LPIPS weight zero.', lambda: F.BoolEditor('Enable eye adversarial loss'), inline_label=True),
+    'adversarial.weight': _spec('Adversarial weight', 'Zero trains a shadow discriminator but adds no adversarial gradient to the adapter.', lambda: F.FloatEditor(0, 100, step=0.0001, decimals=8)),
+    'adversarial.discriminator_lr': _spec('Discriminator LR', 'FP32 Adam learning rate for the small eye discriminator.', lambda: F.FloatEditor(0, 1, step=0.00001, decimals=8)),
+    'adversarial.warm_start': _spec('Discriminator warm start', 'Optional eye-discriminator safetensors checkpoint.', lambda: F.PathEditor('file')),
+    'perceptual.enabled': _spec('Enable decoded supervision', 'Frozen VSF3 decoder path. LPIPS is loaded only when its weight is positive; eye adversarial training uses weight zero here.', lambda: F.BoolEditor('Enable decoded supervision'), inline_label=True),
+    'perceptual.weight': _spec('LPIPS weight', 'Added to ordinary flow MSE.', lambda: F.FloatEditor(0, 100, 6)),
+    'perceptual.max_t': _spec('Maximum noise timestep', 'Apply only to t at or below this threshold (0 is clean).', lambda: F.FloatEditor(.001, 1, 3)),
+    'perceptual.every': _spec('Every N microbatches', 'Frequency per GPU; independent of gradient accumulation.', lambda: F.IntEditor(1, 10000)),
+    'perceptual.cache_dir': _spec('Decoded target cache', 'Cache keyed by VAE checksum and latent contents.', lambda: F.PathEditor('folder')),
+    'perceptual.eye_manifest': _spec('Eye annotation manifest', 'Optional approved eye manifest JSON. Empty uses whole-image LPIPS; unannotated samples receive flow loss only.', lambda: F.PathEditor('file')),
+    'perceptual.dedicated_low_noise': _spec('Dedicated low-noise example', 'Experimental: add one approved eye example per GPU per update, t uniform in [0.05, max_t]. Weight=0 gives the matched flow-only control.', lambda: F.BoolEditor('Add low-noise example'), inline_label=True),
+
     'self_flow.enabled': _spec('Enable Self-Flow', 'Experimental full finetuning: configurable batch size, packed cached latents/text, dual timestep; student block 4, teacher block 8. Saves inference checkpoints and EMA resume state.', lambda: F.BoolEditor('Enable experimental Self-Flow'), inline_label=True),
     'self_flow.ema_dtype': _spec('EMA storage precision', 'BF16 saves memory; FP32 retains small EMA updates directly.', lambda: F.ChoiceEditor(['bfloat16', 'float32'])),
     'self_flow.ema_device': _spec('EMA storage device', 'CPU streams the teacher and greatly reduces speed in our tests.', lambda: F.ChoiceEditor(['cuda', 'cpu'])),
@@ -67,16 +90,17 @@ SPEC: dict[str, Spec] = {
     "train.attention_backend": _spec("Attention backend", "torch_varlen uses PyTorch's built-in packed attention. SDPA uses padded attention.", lambda: F.ChoiceEditor(["sdpa", "torch_varlen", "flash_attn_2", "flash_attn_3"])),
     "train.max_text_tokens": _spec("Maximum text tokens", "Caption token budget after removing the Qwen3-VL system prefix.", lambda: F.IntEditor(1, 4096)),
     # ------------------------------------------------------------------ train
+    "train.model_family": _spec("Model family", "Flux3/MOSS text-to-image support is experimental; select SDPA or torch_varlen attention.", lambda: F.ChoiceEditor(["auto", "mage_flow", "flux3", "moss_image"])),
     "train.model_path": _spec(
-        "Model (diffusers dir)",
-        'Local Mage-Flow repository: transformer/, text_encoder/, tokenizer/ and vae/.',
+        "Model directory",
+        'Local Mage-Flow repository, Flux3 BF16 package, or MOSS-Image package with transformer/, text_encoder/, tokenizer/ and vae/.',
         lambda: F.PathEditor("folder")),
     "train.output_dir": _spec(
         "Output directory",
         "Checkpoints land in <output_dir>/<run_name>/<tag>/.",
         lambda: F.PathEditor("folder")),
     "train.transformer_path": _spec("Transformer file (optional)",
-        "Native Mage-Flow .safetensors. Overrides the Diffusers transformer; leave blank to use the directory.",
+        "Native Mage-Flow, BF16 Flux3, or unquantized MOSS .safetensors. Overrides transformer weights; leave blank to use the model directory.",
         lambda: F.PathEditor("file")),
     "train.text_encoder_path": _spec("Text encoder file (optional)",
         "Qwen3-VL-4B BF16 .safetensors. Overrides the Diffusers text encoder. Uses the bundled tokenizer by default.",
@@ -878,7 +902,7 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
     ]),
     ("Training", [
         ("Model / Output", [
-            "train.model_path", "train.transformer_path", "train.text_encoder_path",
+            "train.model_family", "train.model_path", "train.transformer_path", "train.text_encoder_path",
             "train.vae_path", "train.flux2_vae", "train.tokenizer_path", "train.output_dir", "train.run_name",
         ]),
         ("Schedule Length", [
@@ -939,12 +963,25 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
             "flow.dual_timestep", "flow.dual_timestep_mask_ratio",
         ]),
         ("High-Frequency Token Loss", [
-            "flow.hf_scale", "flow.hf_exponent",
+            "flow.hf_scale", "flow.hf_exponent", 'flow.hf_high_noise_snr_cut',
+            'flow.hf_high_noise_min_weight', 'flow.hf_high_noise_power',
         ]),
         ("Experimental RTI", [
             "rti.enabled", "rti.dense_prefix_blocks", "rti.dense_suffix_blocks", "rti.size_buckets",
             "rti.start_keep", "rti.target_keep", "rti.identity_steps", "rti.warmup_steps",
             "rti.anneal_steps", "rti.budget_steps",
+        ]),
+        ('Paired Latent Texture Loss', [
+            'paired_texture.scale', 'paired_texture.levels', 'paired_texture.patch',
+            'paired_texture.tokens', 'paired_texture.features', 'paired_texture.seed',
+            'paired_texture.snr_cut', 'paired_texture.min_gate',
+        ]),
+        ('Experimental Decoded Perceptual Loss', [
+            'perceptual.enabled', 'perceptual.weight', 'perceptual.max_t',
+            'perceptual.every', 'perceptual.cache_dir', 'perceptual.eye_manifest', 'perceptual.dedicated_low_noise',
+        ]),
+        ('Experimental Eye Adversarial Loss', [
+            'adversarial.enabled', 'adversarial.weight', 'adversarial.discriminator_lr', 'adversarial.warm_start',
         ]),
         ('Experimental Self-Flow', [
             'self_flow.enabled', 'self_flow.ema_dtype', 'self_flow.ema_device',

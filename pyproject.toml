@@ -49,6 +49,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+perceptual = ["lpips==0.1.4"]
 # Cosine optimal-transport noise pairing (models/trainer.py:39). CPU fallback is scipy.
 ot = ["scipy"]
 gui = [

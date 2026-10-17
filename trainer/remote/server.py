@@ -86,7 +86,8 @@ def validate_toml(text: str) -> dict:
             cfg = load_config(tmp)
         except Exception as exc:
             return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        warnings = []
+        from ..training.config import config_warnings
+        warnings = config_warnings(cfg)
         folders = []
         try:
             folders = [s.path for s in cfg.dataset.effective_subsets()]

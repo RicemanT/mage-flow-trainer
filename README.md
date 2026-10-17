@@ -27,19 +27,86 @@ Trackers are optional: `pip install -r requirements-tracking.txt`.
 - **Adapter choices:** PEFT LoRA and LyCORIS LoCon, LoKr (including configurable factor), and DoRA. LyCORIS supports compilation; LoCon/LoKr default to bypass, and DoRA uses weight decomposition on output.
 - **Practical controls:** GUI configuration, gradient checkpointing, `torch.compile`, single-GPU or distributed training, adapter export, and resumable caches.
 
+Experimental decoded-loss tools include [LPIPS](docs/decoded-perceptual-loss.md)
+and an [eye-local adversarial loss](docs/eye-adversarial-loss.md), through a frozen
+FLUX.2/VSF3 decoder. These are research options, not established eye-quality fixes;
+the tested LPIPS variants did not improve the Houki portrait comparisons.
+
 ## SDNQ and consumer hardware
 
 Training-mode INT8/UINT8 uses a compatibility fix for small-update preservation
 with stochastic rounding. See the [rounding diagnosis and validation](docs/sdnq-integer-update-rounding.md)
 before reusing learning rates from older quantized finetunes.
 
-Its 8B transformer has a different memory budget from the Mage-Flow measurements below.
-
 **For full-model finetuning on the 24 GB consumer GPUs targeted here, treat SDNQ as a practical requirement.** Updating 4.116 billion parameters requires space for weights, gradients, optimizer state, and activations. Use SDNQ **training mode**, INT8 weights, and a **Cached Text Encoder**; optimizer-state quantization and CPU offloading may also be necessary. Offloading shifts memory pressure to system RAM, so SDNQ alone does not guarantee that a configuration fits. Our [full-model smoke test](docs/bisque-finetune-smoke.md) used quantized, CPU-offloaded optimizer states.
 
 **LoRA benefits less from SDNQ, but the savings are still welcome.** Only the small adapter is updated, so base-model gradients and optimizer states are already absent. SDNQ **frozen mode** reduces the base weights' VRAM footprint, leaving more room for image resolution or batch size. It is optional for LoRA when the unquantized model fits. Full finetuning without SDNQ remains supported for hardware with sufficient memory.
 
 An [experimental compressed-modulation variant](docs/compressed-modulation.md) reduces the large block AdaLN projections while keeping them trainable. Use the dedicated [Load Compressed Mage-Flow custom node](https://github.com/bluvoll/ComfyUI-MageFlow-Compressed) for ComfyUI inference. It does not change ordinary Mage-Flow checkpoints or ComfyUI's built-in loaders.
+
+## Experimental FLUX.3 Image Klein Base support
+
+The GUI and CLI also support **FLUX.3 Image Klein Base** text-to-image adapters
+and full finetuning, with native BF16 checkpoints, SDNQ UINT8 weight storage,
+Cached Text Encoder embeddings, gradient checkpointing, compilation, and packed
+`torch_varlen` attention. SDPA remains available. Reference-image editing and
+distilled flow-map checkpoints are not supported.
+
+**Support may be temporary.** Mage-Flow remains this trainer's primary focus.
+If FLUX.3 Klein sees little adoption or is abandoned by the open-source community,
+its experimental support may be discontinued or removed. Long-term maintenance
+is not guaranteed.
+
+Start with the [full-finetuning preset](configs/flux3-finetune-experimental.toml)
+or [LoCon preset](configs/flux3-locon-experimental.toml), set your dataset/model
+paths, and select `flux3` as the model family in the GUI. Cache latents with the
+Flux3 package's own VAE; Mage-VAE and VSF3 caches are not interchangeable.
+
+A **10-update test on two RTX 4090s**, at **512px and batch 2 per GPU**, completed
+full text-to-image finetuning with UINT8 SDNQ, Adafactor, checkpointing, compile,
+and varlen attention, **without CPU offload**:
+
+| GPU | Peak allocated | Peak reserved |
+|---|---:|---:|
+| GPU 0 | 17.27 GiB | 17.45 GiB |
+| GPU 1 | 17.30 GiB | 17.51 GiB |
+
+Effective batch was 4, with a median **2.93 seconds/update** after the first step.
+This controlled test repeated one cached image with an 80-token caption and
+excluded checkpoint saving. It demonstrates execution and memory feasibility,
+not convergence or a memory guarantee for other datasets.
+
+Flux3 concatenates eight Qwen hidden layers into **20,480 features per token**.
+BF16 cached embeddings cost **40 KiB per retained token** (20 MiB for a 512-token
+caption, per unique variation). The finetuning preset caps text at **128 tokens**
+to match the memory tests; raise `train.max_text_tokens` if captions are longer,
+allowing for additional cache storage and VRAM.
+
+See the [Flux3 guide](docs/flux3-experimental.md) for model layout, limitations,
+validation, and licensing details.
+
+## Experimental MOSS-Image support
+
+**Support may be temporary.** Mage-Flow remains this trainer's primary focus.
+If MOSS-Image sees little adoption or is abandoned by the open-source community,
+its experimental support may be discontinued or removed. Long-term maintenance
+is not guaranteed.
+
+Native **MOSS-Image Base/SFT** supports full finetuning and PEFT/LyCORIS adapters,
+SDNQ UINT8, Cached Text Encoder embeddings, packed `torch_varlen`, checkpointing,
+compile, and GUI configuration. The 5.082B single-stream transformer uses shared
+modulation and Qwen3.5-9B final-layer conditioning. Its packaged FLUX.2 VAE has
+an /8 encoder and a smaller decoder; latent packing gives an effective /16 stride.
+Use fresh latent caches with that VAE.
+
+Start with the [finetuning preset](configs/moss-image-finetune-experimental.toml)
+or [LoCon preset](configs/moss-image-locon-experimental.toml), both defaulting to
+1024px. Replace dataset and model paths. The [MOSS guide](docs/moss-image-experimental.md) documents the
+supported checkpoint layout, validation, sampling choices, and limitations.
+A ten-update 512px DDP full-finetune test at batch 1 per GPU peaked at **15.72 GiB
+allocated per RTX 4090**, using cached short captions, UINT8 SDNQ, Adafactor,
+checkpointing and compile, without CPU offload. This is experimental support;
+smoke tests do not establish image quality or memory needs for longer captions.
 
 ## Start training
 
@@ -261,6 +328,9 @@ See the [test and dtype audit](docs/bisque-finetune-smoke.md) and [full-finetuni
 
 - [Training and configuration guide](docs/training-guide.md)
 - [Caption variation cache](docs/caption-variation-cache.md)
+- [SNR-gated HF and paired texture losses](docs/detail-losses.md)
+- [Experimental Flux3 text-to-image training](docs/flux3-experimental.md)
+- [Experimental MOSS-Image training](docs/moss-image-experimental.md)
 - [Reproducible benchmark preset](configs/mageflow-readme-benchmark.toml)
 - [Benchmark methodology and detailed results](docs/readme-vram-benchmark.md)
 

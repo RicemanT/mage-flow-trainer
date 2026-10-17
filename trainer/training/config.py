@@ -18,6 +18,9 @@ from .curriculum import Curriculum, Phase
 from .flow import FlowConfig
 from .params import AdapterConfig, ComponentLRs
 from .preserve import PreserveConfig
+from .perceptual import PerceptualConfig
+from .eye_adversarial import EyeAdversarialConfig
+from .paired_texture import PairedTextureConfig
 from .quant import QuantConfig
 from ..modeling.region_tokens import BudgetSchedule
 from .optimizer_specs import OPTIMIZERS
@@ -181,7 +184,7 @@ DEFAULT_MODEL_PATH = os.environ.get("MAGE_FLOW_MODEL", "mage-flow")
 
 @dataclass
 class TrainConfig:
-    model_family: str = "auto"  # auto | mage_flow
+    model_family: str = "auto"  # auto | mage_flow | flux3 | moss_image
     model_path: str = DEFAULT_MODEL_PATH
     transformer_path: str | None = None
     text_encoder_path: str | None = None
@@ -258,11 +261,13 @@ class TrainConfig:
     compile_regional: bool = True
 
     def __post_init__(self):
-        if self.model_family not in ("auto", "mage_flow"):
-            raise ValueError("train.model_family must be auto or mage_flow")
+        if self.model_family not in ("auto", "mage_flow", "flux3", "moss_image"):
+            raise ValueError("train.model_family must be auto, mage_flow, flux3 or moss_image")
         if self.compile is False:
             self.compile = None
-        if self.pack_resolutions and (self.attention_backend == "sdpa" or type(self.batch_size) is not int or self.batch_size < 1):
+        from ..modeling.loader import resolve_model_family
+        allows_sdpa_packing = resolve_model_family(self.model_path, self.model_family) in ('flux3', 'moss_image')
+        if self.pack_resolutions and ((self.attention_backend == "sdpa" and not allows_sdpa_packing) or type(self.batch_size) is not int or self.batch_size < 1):
             raise ValueError("pack_resolutions requires packed attention and a positive integer batch_size")
         if type(self.text_cache_batch_size) is not int or self.text_cache_batch_size < 1:
             raise ValueError("train.text_cache_batch_size must be a positive integer")
@@ -509,6 +514,9 @@ class Config:
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     sampling: SamplingConfig = field(default_factory=SamplingConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
+    perceptual: PerceptualConfig = field(default_factory=PerceptualConfig)
+    adversarial: EyeAdversarialConfig = field(default_factory=EyeAdversarialConfig)
+    paired_texture: PairedTextureConfig = field(default_factory=PairedTextureConfig)
     # `[[curriculum]]` -- an array of tables, so it is built by hand in `load_config` rather than
     # through `_SECTIONS`. Empty by default; an empty curriculum is exactly today's behaviour.
     curriculum: Curriculum = field(default_factory=Curriculum)
@@ -535,6 +543,9 @@ _SECTIONS = {
     "tracking": TrackingConfig,
     "sampling": SamplingConfig,
     "eval": EvalConfig,
+    "perceptual": PerceptualConfig,
+    "adversarial": EyeAdversarialConfig,
+    "paired_texture": PairedTextureConfig,
 }
 
 
@@ -548,8 +559,38 @@ def _build(cls, data: dict, path: str):
 
 
 def validate_model_options(cfg):
+    if cfg.paired_texture.scale and (cfg.flow.dual_timestep or cfg.self_flow.enabled
+                                     or any(p.mode == 'texture' for p in cfg.curriculum.phases)):
+        raise ValueError('Paired texture loss requires scalar timesteps and unmasked images; '
+                         'dual timestep, Self-Flow and texture curriculum phases are unsupported')
+    if cfg.adversarial.enabled and (not cfg.perceptual.enabled
+                                    or not cfg.perceptual.dedicated_low_noise
+                                    or cfg.perceptual.weight != 0):
+        raise ValueError('Eye adversarial experiment requires dedicated eye examples and perceptual.weight=0 (LPIPS off)')
     from ..modeling.loader import resolve_model_family
     cfg.train.model_family = resolve_model_family(cfg.train.model_path, cfg.train.model_family)
+    if cfg.train.model_family in ('flux3', 'moss_image'):
+        cfg.train.flux2_vae = True
+        if (cfg.flow.dual_timestep or cfg.self_flow.enabled or cfg.rti.enabled or
+            cfg.perceptual.enabled or cfg.adversarial.enabled or cfg.preserve.enabled or cfg.curriculum.phases):
+            raise ValueError('Experimental Flux3/MOSS supports text-to-image flow training without RTI, Self-Flow, dual timestep, decoded losses or curricula')
+        if cfg.train.attention_backend not in ('sdpa', 'torch_varlen') or cfg.train.checkpoint_blocks is not None:
+            raise ValueError('Experimental Flux3/MOSS requires SDPA or torch_varlen and all-block checkpointing')
+        if cfg.train.compile_text_encoder or cfg.train.text_encoder_embedding_only:
+            raise ValueError('Flux3/MOSS text extraction requires compile_text_encoder=false and text_encoder_embedding_only=false')
+    if cfg.perceptual.enabled:
+        if cfg.perceptual.dedicated_low_noise and (cfg.train.gradient_accumulation_steps != 1
+                                                  or type(cfg.train.batch_size) is not int
+                                                  or cfg.train.resume_from):
+            raise ValueError('Dedicated eye experiment requires a fresh run, integer batch_size and gradient_accumulation_steps=1')
+        if (not cfg.train.flux2_vae or not cfg.train.pack_resolutions
+                or cfg.dataset.source != 'latents' or cfg.flow.dual_timestep
+                or cfg.self_flow.enabled or cfg.rti.enabled or cfg.curriculum.phases
+                or cfg.preserve.enabled or cfg.flow.hf_scale or cfg.flow.use_ot
+                or cfg.optimizer.gradient_release):
+            raise ValueError('Decoded perceptual loss requires packed cached FLUX.2/VSF3 latents; '
+                             'dual timestep, Self-Flow, RTI, curriculum, preservation, HF loss, OT '
+                             'and gradient release must be disabled for this experiment')
     if cfg.self_flow.enabled:
         if (cfg.train.model_family != 'mage_flow' or cfg.is_lora
                 or not cfg.train.pack_resolutions or not cfg.flow.dual_timestep
@@ -561,6 +602,28 @@ def validate_model_options(cfg):
                              'packed cached latents, Cached Text Encoder, and dual timestep. '
                              'RTI, curriculum, preservation, HF loss, OT, gradient release, frozen quantization '
                              'and quantized matmul are not supported together with it.')
+
+
+SDNQ_OPTIMIZERS = ("adamw8bit", "adafactor", "came", "lion", "muon")
+KAHAN_ADALN_WARNING = (
+    "optimizer.use_kahan with AdaLN trained: SDNQ's Kahan summation wrecks the shared AdaLN projection. "
+    "In an audit of a MageTrail FLUX.2-VAE finetune it moved the shared projection 60.7% (1.1% without "
+    "Kahan) and block modulation 8.9% (0.15%); samples went unstable and fried and the loss rose instead "
+    "of falling. Set optimizer.use_kahan = false, or freeze AdaLN ([component_lr] adaln = 0).")
+
+
+def kahan_adaln_risk(kind, use_kahan, adapter_kind, adaln_lr) -> bool:
+    """SDNQ Kahan on a full finetune that trains AdaLN (an unset AdaLN LR means the main one)."""
+    return (bool(use_kahan) and str(kind or "").lower() in SDNQ_OPTIMIZERS
+            and (adapter_kind or "none") == "none" and adaln_lr != 0)
+
+
+def config_warnings(cfg: "Config") -> list[str]:
+    """Legal settings known to train badly; shown before a run starts (trainer, remote check, GUI)."""
+    out = []
+    if kahan_adaln_risk(cfg.optimizer.kind, cfg.optimizer.use_kahan, cfg.adapter.kind, cfg.component_lr.adaln):
+        out.append(KAHAN_ADALN_WARNING)
+    return out
 
 
 def load_config(path: str | Path) -> Config:

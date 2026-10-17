@@ -112,6 +112,21 @@ export writes `protected_tags.txt` with every character and copyright tag in the
 - The path is not part of the caption cache key; the tags it holds are, so editing the file builds
   new caption slots.
 
+## Kahan + AdaLN warning
+
+SDNQ's Kahan summation (`optimizer.use_kahan`) damages the shared AdaLN projection when AdaLN is trained. In
+an audit of the MageTrail V0.4 pilot (FLUX.2 VAE, AdamW 8-bit) the shared projection moved 60.7% with Kahan
+against 1.1% without, and block modulation 8.9% against 0.15%. Samples went unstable and the loss rose
+instead of falling. Upstream regards it as an SDNQ issue and does not change it; its MOSS-Image and Flux3
+presets set `use_kahan = false`.
+
+The fork warns instead of refusing, since the combination is legal: the GUI shows it as an advisory, the
+remote server's config check returns it, and the trainer prints it at startup. It fires for an SDNQ optimizer
+(`adamw8bit`, `adafactor`, `came`, `lion`, `muon`) with `use_kahan = true` in a full finetune that trains
+AdaLN (an unset `component_lr.adaln` means it trains at the main LR). It applies to every model family with a
+shared modulation, MOSS-Image's `shared_block_modulation` included. Fix: `use_kahan = false`, or freeze AdaLN
+with `[component_lr] adaln = 0`.
+
 ## Experiment tracking
 
 ```toml

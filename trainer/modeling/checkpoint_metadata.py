@@ -20,6 +20,16 @@ def checkpoint_identity(path):
     """
     source = Path(path).expanduser()
     weights = source / "diffusion_pytorch_model.safetensors" if source.is_dir() else source
+    if source.is_dir() and not weights.is_file():
+        from .moss_loader import weight_files
+        shards = [checkpoint_identity(p) for p in weight_files(source)]
+        manifest = json.dumps([(s['name'], s['md5']) for s in shards], separators=(',', ':'))
+        return dict(name=source.name, path=str(source.resolve()),
+                    md5=hashlib.md5(manifest.encode(), usedforsecurity=False).hexdigest(),
+                    md5_scope='ordered_shard_name_and_md5_manifest',
+                    size_bytes=sum(s['size_bytes'] for s in shards),
+                    model_type='moss_image' if any(s['model_type']=='moss_image' for s in shards) else 'sharded',
+                    compressed=False, rti=False, shards=shards)
     before = weights.stat()
     digest = hashlib.md5(usedforsecurity=False)
     with weights.open('rb') as handle:
@@ -35,6 +45,10 @@ def checkpoint_identity(path):
     compressed = 'modulation_down.weight' in keys
     rti = any(k.startswith('region_interface.') for k in keys)
     kind = ('compressed' if compressed else 'full_mage_flow') + ('_rti' if rti else '')
+    if 'single_blocks.0.q_proj.weight' in keys and 'emb_in.image.weight' in keys:
+        kind = 'flux3'
+    if 'shared_block_modulation.weight' in keys:
+        kind = 'moss_image'
     after = weights.stat()
     if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
         raise RuntimeError(f'Source checkpoint changed while hashing: {weights}')
