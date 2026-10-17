@@ -1045,7 +1045,7 @@ class TrainingGUI(QtWidgets.QWidget):
 
 
 def main():
-    app = QtWidgets.QApplication(sys.argv)
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
     app.setApplicationName("Mage-Flow Trainer")
     window = TrainingGUI()

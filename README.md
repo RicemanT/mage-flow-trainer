@@ -114,6 +114,14 @@ The GUI uses the same TOML configuration and training backend as the CLI. Launch
 .venv/bin/python -m trainer.gui
 ```
 
+At startup the GUI checks the current Git branch's configured upstream for updates,
+including when running from a fork. If behind, it offers a fast-forward-only pull;
+choosing No starts the current version. Local tracked edits or divergent commits
+require a manual update. Missing Git, no upstream, or an unavailable network do not
+prevent startup. Updates do not install Python dependencies. To skip the check,
+launch with `python -m trainer.gui --no-update-check` (the launch scripts also
+accept `--no-update-check`).
+
 1. Load a preset and choose a run name. Under **Model / Output**, select a Diffusers directory or separate transformer, text encoder, and VAE files.
 2. Set your dataset folder and resolution, then use **Cache latents** to prepare images for training from cached latents.
 3. In **Method**, choose PEFT LoRA, LyCORIS LoCon/LoKr/DoRA, or full finetuning. Configure SDNQ for that mode. Full finetuning exposes **Train AdaLN**; adapters always leave AdaLN frozen.
