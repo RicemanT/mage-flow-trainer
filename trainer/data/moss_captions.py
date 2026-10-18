@@ -14,6 +14,10 @@ as its prompt compiler does (floor the top/left edge, ceil the bottom/right, sub
 
 `caption_mode` / `mixed_weights` select them as the variants `short`, `medium`, `long` and `layout`; a sample
 without the file a variant needs falls back to its NL caption, then to its tags.
+
+Besides MOSS's `character` / `object` / `text` items, MageTrail layouts carry `panel` items (a comic or collage
+panel with a caption of what happens in it), an extension the fine-tune learns; `layout_panels = false` leaves
+them out.
 """
 from __future__ import annotations
 
@@ -24,6 +28,7 @@ import random
 from pathlib import Path
 
 ANNOTATION_VARIANTS = ("short", "medium", "long", "layout")
+LAYOUT_LABELS = ("character", "object", "text", "panel")   # "panel": MageTrail's extension
 MIN_VISIBLE = 0.5         # an item keeps its box when at least this share of it survives the crop...
 MIN_VISIBLE_TEXT = 0.9    # ...text needs nearly all of it, or the box would claim text that is cut off
 
@@ -58,15 +63,16 @@ class Annotations:
         text = caption.get(kind) if isinstance(caption, dict) else None
         return " ".join(text.split()) if isinstance(text, str) and text.strip() else None
 
-    def layout(self, summary_prefix: str = "", rng: random.Random | None = None, item_dropout: float = 0.0) -> str | None:
+    def layout(self, summary_prefix: str = "", rng: random.Random | None = None, item_dropout: float = 0.0,
+               panels: bool = True) -> str | None:
         self._load()
         if not isinstance(self._layout, dict) or not all(self.source_size) or not all(self.bucket):
             return None
-        return compile_layout(self._layout, self.source_size, self.bucket, summary_prefix, rng, item_dropout)
+        return compile_layout(self._layout, self.source_size, self.bucket, summary_prefix, rng, item_dropout, panels)
 
-    def available(self) -> set[str]:
+    def available(self, panels: bool = True) -> set[str]:
         out = {kind for kind in ("short", "medium", "long") if self.caption(kind)}
-        if self.layout() is not None:
+        if self.layout(panels=panels) is not None:
             out.add("layout")
         return out
 
@@ -100,7 +106,7 @@ def drop_items(items: list, rng: random.Random, item_dropout: float) -> list:
 
 
 def compile_layout(layout: dict, source_size, bucket, summary_prefix: str = "",
-                   rng: random.Random | None = None, item_dropout: float = 0.0) -> str | None:
+                   rng: random.Random | None = None, item_dropout: float = 0.0, panels: bool = True) -> str | None:
     """MOSS's model-facing layout prompt for one training crop, or None when no item survives the crop.
     With `item_dropout` (and an `rng`), a random share of the surviving items is left out (`drop_items`)."""
     width, height = source_size
@@ -109,7 +115,9 @@ def compile_layout(layout: dict, source_size, bucket, summary_prefix: str = "",
     items = []
     for item in layout.get("items") or []:
         box = item.get("box_2d") if isinstance(item, dict) else None
-        if not isinstance(box, list) or len(box) != 4 or item.get("label") not in ("character", "object", "text"):
+        if not isinstance(box, list) or len(box) != 4 or item.get("label") not in LAYOUT_LABELS:
+            continue
+        if item["label"] == "panel" and not panels:
             continue
         y0, x0, y1, x1 = (box[0] / 1000 * height * scale - top, box[1] / 1000 * width * scale - left,
                           box[2] / 1000 * height * scale - top, box[3] / 1000 * width * scale - left)

@@ -116,3 +116,25 @@ def test_layout_item_dropout_varies_granularity(tmp_path):
     assert all(len(json.loads(build_caption("1girl", None, off, random.Random(s), notes))["items"]) == 3 for s in range(20))
     assert "layout_item_dropout" not in caption_identity(off)
     assert caption_identity(cfg)["layout_item_dropout"] == 0.7
+
+
+def test_panel_items(tmp_path):
+    comic = {"summary": {"canvas": "multi_panel", "caption": "Two panels."}, "items": [
+        {"label": "panel", "caption": "Left panel: Miku waves.", "box_2d": [0, 0, 1000, 500]},
+        {"label": "character", "caption": "Miku waving.", "box_2d": [100, 50, 900, 450]},
+        {"label": "panel", "caption": "Right panel: Miku sleeps.", "box_2d": [0, 500, 1000, 1000]},
+        {"label": "character", "caption": "Miku asleep.", "box_2d": [300, 550, 900, 950]}]}
+    write_annotations(tmp_path, layout=comic)
+    notes = Annotations(tmp_path / "img", (1000, 1000), (512, 512))
+    items = json.loads(build_caption("1girl", None, CaptionConfig(caption_mode="layout"), random.Random(0), notes))["items"]
+    assert [i["label"] for i in items] == ["panel", "character", "panel", "character"]
+    assert items[0] == {"label": "panel", "caption": "Left panel: Miku waves.", "bbox": [-256, -256, 256, 0]}
+    off = CaptionConfig(caption_mode="layout", layout_panels=False)
+    items = json.loads(build_caption("1girl", None, off, random.Random(0), notes))["items"]
+    assert [i["label"] for i in items] == ["character", "character"]
+    assert "layout_panels" not in caption_identity(CaptionConfig()) and caption_identity(off)["layout_panels"] is False
+    # A layout of panels only has no layout variant without panels: it falls back instead of an empty caption.
+    write_annotations(tmp_path, stem="only", layout={"summary": {"caption": "x"}, "items": comic["items"][::2]})
+    only = Annotations(tmp_path / "only", (1000, 1000), (512, 512))
+    assert "layout" in only.available() and "layout" not in only.available(panels=False)
+    assert build_caption("1girl", "An NL caption.", off, random.Random(0), only) == "An NL caption."

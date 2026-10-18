@@ -488,6 +488,11 @@ SPEC: dict[str, Spec] = {
         "value, so the model learns both complete and sparse layouts. At least one item stays. 0 = off; "
         "0.5 = from all items down to about half.",
         lambda: F.FloatEditor(0.0, 0.9, 0.05, 2)),
+    "dataset.caption.layout_panels": _spec(
+        "Panel items in layouts",
+        "MageTrail layouts box each comic / collage panel with a caption of what happens in it, beyond MOSS's "
+        "character / object / text items. Off = train on MOSS's vocabulary only.",
+        lambda: F.BoolEditor("Keep panel items"), inline_label=True),
     "dataset.caption.attribution_dedupe_on_combine": _spec(
         "Dedupe attribution on tags+NL",
         "tags_nl / nl_tags join both fields, and datasets carry `Drawn by X` in both so it "
@@ -921,6 +926,7 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
             "dataset.caption.keep_order_through_attribution",
             "dataset.caption.annotation_attribution_template",
             "dataset.caption.layout_item_dropout",
+            "dataset.caption.layout_panels",
         ]),
     ]),
     ("Training", [

@@ -87,6 +87,8 @@ class CaptionConfig:
     # Layout granularity: each layout sample leaves out a share of its items drawn between 0 and this value
     # (MOSS requires a box on every item, so whole items go). 0 = always the complete layout.
     layout_item_dropout: float = 0.0
+    # MageTrail layouts carry `panel` items (comic / collage panels) beyond MOSS's vocabulary; false = leave out.
+    layout_panels: bool = True
 
     def __post_init__(self):
         if self.caption_mode not in (*_ALL_VARIANTS, "mixed"):
@@ -169,6 +171,8 @@ def caption_identity(cfg: CaptionConfig) -> dict:
             data.pop(key, None)
     if not cfg.layout_item_dropout:
         data.pop("layout_item_dropout", None)   # off: keys as before the option existed
+    if cfg.layout_panels:
+        data.pop("layout_panels", None)          # default: keys as before the option existed
     return data
 
 
@@ -279,7 +283,7 @@ def build_caption(
         return ""
 
     variant = select_variant(cfg, bool(nl_text), rng,
-                             annotations.available() if annotations is not None else frozenset())
+                             annotations.available(cfg.layout_panels) if annotations is not None else frozenset())
     if variant in _ANNOTATION_VARIANTS:
         return _build_annotation(tags_text, variant, cfg, annotations, rng)
 
@@ -437,7 +441,7 @@ def _build_annotation(tags_text: str, variant: str, cfg: CaptionConfig, annotati
         if prefix_parts:
             # The template's text around {caption}, applied to the layout summary's caption.
             prefix = cfg.annotation_attribution_template.split("{caption}")[0].format(attribution=prefix_parts[0])
-        return annotations.layout(prefix, rng, cfg.layout_item_dropout) or ""
+        return annotations.layout(prefix, rng, cfg.layout_item_dropout, cfg.layout_panels) or ""
     text = annotations.caption(variant) or ""
     if prefix_parts and text:
         return cfg.annotation_attribution_template.format(attribution=prefix_parts[0], caption=text)

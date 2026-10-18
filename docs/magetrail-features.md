@@ -139,6 +139,10 @@ Boxes are `[y_min, x_min, y_max, x_max]` normalized to 0-1000 of the original im
   (Ideogram 4 likewise trains with optional boxes). MOSS requires a box on every item, so whole items go; their
   order is kept and at least one stays. With caption variations each slot draws its own subset; 0.5 gives
   everything from the full layout down to about half of it.
+- **Panels.** Beyond MOSS's `character` / `object` / `text`, MageTrail layouts carry `panel` items: one box
+  per comic or collage panel, captioned with what happens in it, so the tune learns panel composition (base
+  MOSS-Image only has the summary's `canvas: "multi_panel"`). `layout_panels = false` trains on MOSS's
+  vocabulary only. Prompt it as `{"label":"panel","caption":"...","bbox":[...]}` next to the other items.
 - Weights left at 0 for the new variants are dropped from the config, so configs that do not use them keep
   their caption-variation cache keys. When they are used, the annotation files and the crop are part of the
   key, so editing a caption builds new slots.
