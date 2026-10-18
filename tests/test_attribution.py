@@ -99,7 +99,7 @@ class AttributionTests(unittest.TestCase):
         legacy = asdict(plain)
         for key in ("attribution_patterns", "attribution_position",
                     "attribution_dropout_immune", "attribution_dedupe_on_combine",
-                    "keep_order_through_attribution", "annotation_attribution_template",
+                    "keep_order_through_attribution", "annotation_attribution_template", "layout_item_dropout",
                     "protected_tags_file"):   # a machine-specific path, never part of the key
             legacy.pop(key)
         self.assertEqual(digest(caption_identity(plain)), digest(legacy))

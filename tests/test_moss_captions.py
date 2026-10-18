@@ -98,3 +98,21 @@ def test_annotations_for_latent_entries(tmp_path):
     assert annotations_for(Entry, CaptionConfig(caption_mode="tags")) is None, "no file reads when unused"
     notes = annotations_for(Entry, CaptionConfig(caption_mode="mixed", mixed_weights={"layout": 1}))
     assert notes.base == Path(tmp_path / "img") and notes.available() == {"short", "medium", "long", "layout"}
+
+
+def test_layout_item_dropout_varies_granularity(tmp_path):
+    notes = Annotations(write_annotations(tmp_path), (1000, 1500), (512, 768))
+    full = json.loads(notes.layout())["items"]
+    assert len(full) == 3
+    cfg = CaptionConfig(caption_mode="layout", layout_item_dropout=0.7)
+    counts = set()
+    for seed in range(60):
+        items = json.loads(build_caption("1girl", None, cfg, random.Random(seed), notes))["items"]
+        assert 1 <= len(items) <= 3
+        assert [full.index(i) for i in items] == sorted(full.index(i) for i in items), "order kept"
+        counts.add(len(items))
+    assert counts == {1, 2, 3}, counts
+    off = CaptionConfig(caption_mode="layout")
+    assert all(len(json.loads(build_caption("1girl", None, off, random.Random(s), notes))["items"]) == 3 for s in range(20))
+    assert "layout_item_dropout" not in caption_identity(off)
+    assert caption_identity(cfg)["layout_item_dropout"] == 0.7

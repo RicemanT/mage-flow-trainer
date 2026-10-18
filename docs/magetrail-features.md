@@ -134,6 +134,11 @@ Boxes are `[y_min, x_min, y_max, x_max]` normalized to 0-1000 of the original im
   `keep_order_through_attribution = true` (with `attribution_patterns = ["^@"]`) keeps every tag up to and
   including the last attribution tag in place and never drops them; shuffling and dropout apply only to the
   general tags after it.
+- **Layout granularity.** `layout_item_dropout` (default 0, off) makes each layout sample leave out a random
+  share of its items, drawn between 0 and the setting, so the model learns both complete and sparse layouts
+  (Ideogram 4 likewise trains with optional boxes). MOSS requires a box on every item, so whole items go; their
+  order is kept and at least one stays. With caption variations each slot draws its own subset; 0.5 gives
+  everything from the full layout down to about half of it.
 - Weights left at 0 for the new variants are dropped from the config, so configs that do not use them keep
   their caption-variation cache keys. When they are used, the annotation files and the crop are part of the
   key, so editing a caption builds new slots.

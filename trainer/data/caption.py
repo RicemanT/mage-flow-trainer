@@ -84,6 +84,9 @@ class CaptionConfig:
     # How the artist reaches the annotation captions (short / medium / long / layout summary), which never name
     # the artist themselves: {attribution} = the caption's attribution tags joined with ", ". "" = leave it out.
     annotation_attribution_template: str = "{attribution}. {caption}"
+    # Layout granularity: each layout sample leaves out a share of its items drawn between 0 and this value
+    # (MOSS requires a box on every item, so whole items go). 0 = always the complete layout.
+    layout_item_dropout: float = 0.0
 
     def __post_init__(self):
         if self.caption_mode not in (*_ALL_VARIANTS, "mixed"):
@@ -95,6 +98,8 @@ class CaptionConfig:
         # use them keeps exactly its old caption-cache key.
         self.mixed_weights = {k: v for k, v in self.mixed_weights.items()
                               if v or k not in _ANNOTATION_VARIANTS}
+        if not 0.0 <= self.layout_item_dropout < 1.0:
+            raise ValueError("dataset.caption.layout_item_dropout must be in [0, 1)")
         if self.annotation_attribution_template and "{caption}" not in self.annotation_attribution_template:
             raise ValueError("dataset.caption.annotation_attribution_template must contain {caption}")
         if self.keep_order_through_attribution and not self.attribution_patterns:
@@ -162,6 +167,8 @@ def caption_identity(cfg: CaptionConfig) -> dict:
     if not cfg.attribution_enabled:
         for key in _ATTRIBUTION_DEFAULTS:
             data.pop(key, None)
+    if not cfg.layout_item_dropout:
+        data.pop("layout_item_dropout", None)   # off: keys as before the option existed
     return data
 
 
@@ -274,7 +281,7 @@ def build_caption(
     variant = select_variant(cfg, bool(nl_text), rng,
                              annotations.available() if annotations is not None else frozenset())
     if variant in _ANNOTATION_VARIANTS:
-        return _build_annotation(tags_text, variant, cfg, annotations)
+        return _build_annotation(tags_text, variant, cfg, annotations, rng)
 
     if cfg.attribution_enabled:
         return _build_attributed(tags_text, nl_text, variant, cfg, rng)
@@ -417,7 +424,7 @@ def _build_attributed(tags_text: str, nl_text: str | None, variant: str, cfg: Ca
     raise AssertionError(f"unreachable variant {variant}")
 
 
-def _build_annotation(tags_text: str, variant: str, cfg: CaptionConfig, annotations) -> str:
+def _build_annotation(tags_text: str, variant: str, cfg: CaptionConfig, annotations, rng=None) -> str:
     """A MOSS annotation caption, with the artist (the caption's attribution tags) added by the template:
     the annotation files never name the artist themselves."""
     prefix_parts = []
@@ -430,7 +437,7 @@ def _build_annotation(tags_text: str, variant: str, cfg: CaptionConfig, annotati
         if prefix_parts:
             # The template's text around {caption}, applied to the layout summary's caption.
             prefix = cfg.annotation_attribution_template.split("{caption}")[0].format(attribution=prefix_parts[0])
-        return annotations.layout(prefix) or ""
+        return annotations.layout(prefix, rng, cfg.layout_item_dropout) or ""
     text = annotations.caption(variant) or ""
     if prefix_parts and text:
         return cfg.annotation_attribution_template.format(attribution=prefix_parts[0], caption=text)

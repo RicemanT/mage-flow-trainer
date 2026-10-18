@@ -482,6 +482,12 @@ SPEC: dict[str, Spec] = {
         "and the layout summary, which never name the artist themselves. {attribution} and {caption}; "
         "empty = leave the artist out.",
         lambda: F.TextEditor("{attribution}. {caption}", strip=False)),
+    "dataset.caption.layout_item_dropout": _spec(
+        "Layout granularity",
+        "MOSS layouts: each layout sample leaves out a random share of its items, drawn between 0 and this "
+        "value, so the model learns both complete and sparse layouts. At least one item stays. 0 = off; "
+        "0.5 = from all items down to about half.",
+        lambda: F.FloatEditor(0.0, 0.9, 0.05, 2)),
     "dataset.caption.attribution_dedupe_on_combine": _spec(
         "Dedupe attribution on tags+NL",
         "tags_nl / nl_tags join both fields, and datasets carry `Drawn by X` in both so it "
@@ -914,6 +920,7 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
             "dataset.caption.attribution_dedupe_on_combine",
             "dataset.caption.keep_order_through_attribution",
             "dataset.caption.annotation_attribution_template",
+            "dataset.caption.layout_item_dropout",
         ]),
     ]),
     ("Training", [

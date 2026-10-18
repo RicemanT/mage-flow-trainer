@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import random
 from pathlib import Path
 
 ANNOTATION_VARIANTS = ("short", "medium", "long", "layout")
@@ -57,11 +58,11 @@ class Annotations:
         text = caption.get(kind) if isinstance(caption, dict) else None
         return " ".join(text.split()) if isinstance(text, str) and text.strip() else None
 
-    def layout(self, summary_prefix: str = "") -> str | None:
+    def layout(self, summary_prefix: str = "", rng: random.Random | None = None, item_dropout: float = 0.0) -> str | None:
         self._load()
         if not isinstance(self._layout, dict) or not all(self.source_size) or not all(self.bucket):
             return None
-        return compile_layout(self._layout, self.source_size, self.bucket, summary_prefix)
+        return compile_layout(self._layout, self.source_size, self.bucket, summary_prefix, rng, item_dropout)
 
     def available(self) -> set[str]:
         out = {kind for kind in ("short", "medium", "long") if self.caption(kind)}
@@ -88,8 +89,20 @@ def crop_transform(source_size, bucket):
     return scale, (width * scale - bucket_w) / 2, (height * scale - bucket_h) / 2
 
 
-def compile_layout(layout: dict, source_size, bucket, summary_prefix: str = "") -> str | None:
-    """MOSS's model-facing layout prompt for one training crop, or None when no item survives the crop."""
+def drop_items(items: list, rng: random.Random, item_dropout: float) -> list:
+    """Layout granularity: this sample leaves out a share of the items drawn between 0 and `item_dropout`, so
+    the model sees layouts from complete to sparse. Order is kept and at least one item always stays."""
+    if item_dropout <= 0 or len(items) < 2:
+        return items
+    share = rng.uniform(0.0, item_dropout)
+    kept = [item for item in items if rng.random() >= share]
+    return kept or [items[rng.randrange(len(items))]]
+
+
+def compile_layout(layout: dict, source_size, bucket, summary_prefix: str = "",
+                   rng: random.Random | None = None, item_dropout: float = 0.0) -> str | None:
+    """MOSS's model-facing layout prompt for one training crop, or None when no item survives the crop.
+    With `item_dropout` (and an `rng`), a random share of the surviving items is left out (`drop_items`)."""
     width, height = source_size
     bucket_w, bucket_h = bucket
     scale, left, top = crop_transform(source_size, bucket)
@@ -118,6 +131,8 @@ def compile_layout(layout: dict, source_size, bucket, summary_prefix: str = "") 
         items.append(out)
     if not items:
         return None
+    if rng is not None:
+        items = drop_items(items, rng, item_dropout)
     raw = layout.get("summary") or {}
     summary = {}
     if raw.get("meta"):
