@@ -138,3 +138,23 @@ def test_panel_items(tmp_path):
     only = Annotations(tmp_path / "only", (1000, 1000), (512, 512))
     assert "layout" in only.available() and "layout" not in only.available(panels=False)
     assert build_caption("1girl", "An NL caption.", off, random.Random(0), only) == "An NL caption."
+
+
+def test_short_item_captions(tmp_path):
+    layout = {"summary": {"caption": "A girl and a cup."}, "items": [
+        {"label": "character", "caption": "Hatsune Miku with long teal twintails, waving.", "short": "Miku waving",
+         "box_2d": [100, 100, 900, 600]},
+        {"label": "object", "caption": "A white ceramic cup on the table.", "box_2d": [600, 650, 800, 900]}]}
+    write_annotations(tmp_path, layout=layout)
+    notes = Annotations(tmp_path / "img", (1000, 1000), (512, 512))
+    cfg = CaptionConfig(caption_mode="layout", layout_short_captions=0.5)
+    seen = set()
+    for seed in range(40):
+        items = json.loads(build_caption("1girl", None, cfg, random.Random(seed), notes))["items"]
+        seen.add(items[0]["caption"])
+        assert items[1]["caption"] == "A white ceramic cup on the table.", "no short caption: the full one"
+    assert seen == {"Miku waving", "Hatsune Miku with long teal twintails, waving."}
+    full = CaptionConfig(caption_mode="layout")
+    assert all(json.loads(build_caption("1girl", None, full, random.Random(s), notes))["items"][0]["caption"]
+               == "Hatsune Miku with long teal twintails, waving." for s in range(20))
+    assert "layout_short_captions" not in caption_identity(full) and caption_identity(cfg)["layout_short_captions"] == 0.5

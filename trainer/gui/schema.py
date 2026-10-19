@@ -488,6 +488,12 @@ SPEC: dict[str, Spec] = {
         "value, so the model learns both complete and sparse layouts. At least one item stays. 0 = off; "
         "0.5 = from all items down to about half.",
         lambda: F.FloatEditor(0.0, 0.9, 0.05, 2)),
+    "dataset.caption.layout_short_captions": _spec(
+        "Short item captions",
+        "Share of layout samples whose boxes use their short caption (a few words, e.g. \"Marisa holding a "
+        "spoon\") instead of the full sentence, so short and detailed box prompts both work. Needs layouts "
+        "with short captions (the captioner's layout or shorten mode). 0 = always the full caption.",
+        lambda: F.FloatEditor(0.0, 1.0, 0.05, 2)),
     "dataset.caption.layout_panels": _spec(
         "Panel items in layouts",
         "MageTrail layouts box each comic / collage panel with a caption of what happens in it, beyond MOSS's "
@@ -927,6 +933,7 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
             "dataset.caption.annotation_attribution_template",
             "dataset.caption.layout_item_dropout",
             "dataset.caption.layout_panels",
+            "dataset.caption.layout_short_captions",
         ]),
     ]),
     ("Training", [

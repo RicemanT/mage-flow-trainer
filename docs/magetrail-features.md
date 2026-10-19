@@ -143,6 +143,10 @@ Boxes are `[y_min, x_min, y_max, x_max]` normalized to 0-1000 of the original im
   per comic or collage panel, captioned with what happens in it, so the tune learns panel composition (base
   MOSS-Image only has the summary's `canvas: "multi_panel"`). `layout_panels = false` trains on MOSS's
   vocabulary only. Prompt it as `{"label":"panel","caption":"...","bbox":[...]}` next to the other items.
+- **Short item captions.** Layout items carry a full one-sentence `caption` and a `short` one of a few words,
+  the way people prompt a box ("Reimu", "Marisa holding a spoon on a stool"). `layout_short_captions` (default
+  0) is the share of layout samples whose items use the short caption, so both prompting styles are learned;
+  0.4-0.5 is a reasonable start. Items without one keep their full caption.
 - Weights left at 0 for the new variants are dropped from the config, so configs that do not use them keep
   their caption-variation cache keys. When they are used, the annotation files and the crop are part of the
   key, so editing a caption builds new slots.

@@ -64,11 +64,12 @@ class Annotations:
         return " ".join(text.split()) if isinstance(text, str) and text.strip() else None
 
     def layout(self, summary_prefix: str = "", rng: random.Random | None = None, item_dropout: float = 0.0,
-               panels: bool = True) -> str | None:
+               panels: bool = True, short_share: float = 0.0) -> str | None:
         self._load()
         if not isinstance(self._layout, dict) or not all(self.source_size) or not all(self.bucket):
             return None
-        return compile_layout(self._layout, self.source_size, self.bucket, summary_prefix, rng, item_dropout, panels)
+        return compile_layout(self._layout, self.source_size, self.bucket, summary_prefix, rng, item_dropout, panels,
+                              short_share)
 
     def available(self, panels: bool = True) -> set[str]:
         out = {kind for kind in ("short", "medium", "long") if self.caption(kind)}
@@ -106,9 +107,13 @@ def drop_items(items: list, rng: random.Random, item_dropout: float) -> list:
 
 
 def compile_layout(layout: dict, source_size, bucket, summary_prefix: str = "",
-                   rng: random.Random | None = None, item_dropout: float = 0.0, panels: bool = True) -> str | None:
+                   rng: random.Random | None = None, item_dropout: float = 0.0, panels: bool = True,
+                   short_share: float = 0.0) -> str | None:
     """MOSS's model-facing layout prompt for one training crop, or None when no item survives the crop.
-    With `item_dropout` (and an `rng`), a random share of the surviving items is left out (`drop_items`)."""
+    With `item_dropout` (and an `rng`), a random share of the surviving items is left out (`drop_items`). With
+    `short_share`, that share of samples gives every item that has one its `short` caption ("Marisa holding a
+    spoon") instead of the full sentence, the way people prompt boxes."""
+    use_short = rng is not None and short_share > 0 and rng.random() < short_share
     width, height = source_size
     bucket_w, bucket_h = bucket
     scale, left, top = crop_transform(source_size, bucket)
@@ -130,7 +135,8 @@ def compile_layout(layout: dict, source_size, bucket, summary_prefix: str = "",
                 math.ceil(round(cy1, 9)) - bucket_h // 2, math.ceil(round(cx1, 9)) - bucket_w // 2]
         if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
             continue
-        out = {"label": item["label"], "caption": item.get("caption", "")}
+        caption = item.get("short") if use_short and item.get("short") else item.get("caption", "")
+        out = {"label": item["label"], "caption": caption}
         if item.get("text"):
             out["text"] = item["text"]
         out["bbox"] = bbox

@@ -89,6 +89,9 @@ class CaptionConfig:
     layout_item_dropout: float = 0.0
     # MageTrail layouts carry `panel` items (comic / collage panels) beyond MOSS's vocabulary; false = leave out.
     layout_panels: bool = True
+    # Share of layout samples whose items use their `short` caption (a few words, how people prompt a box) instead
+    # of the full sentence, so both prompting styles are learned. Items without one keep the full caption.
+    layout_short_captions: float = 0.0
 
     def __post_init__(self):
         if self.caption_mode not in (*_ALL_VARIANTS, "mixed"):
@@ -100,6 +103,8 @@ class CaptionConfig:
         # use them keeps exactly its old caption-cache key.
         self.mixed_weights = {k: v for k, v in self.mixed_weights.items()
                               if v or k not in _ANNOTATION_VARIANTS}
+        if not 0.0 <= self.layout_short_captions <= 1.0:
+            raise ValueError("dataset.caption.layout_short_captions must be in [0, 1]")
         if not 0.0 <= self.layout_item_dropout < 1.0:
             raise ValueError("dataset.caption.layout_item_dropout must be in [0, 1)")
         if self.annotation_attribution_template and "{caption}" not in self.annotation_attribution_template:
@@ -173,6 +178,8 @@ def caption_identity(cfg: CaptionConfig) -> dict:
         data.pop("layout_item_dropout", None)   # off: keys as before the option existed
     if cfg.layout_panels:
         data.pop("layout_panels", None)          # default: keys as before the option existed
+    if not cfg.layout_short_captions:
+        data.pop("layout_short_captions", None)
     return data
 
 
@@ -441,7 +448,8 @@ def _build_annotation(tags_text: str, variant: str, cfg: CaptionConfig, annotati
         if prefix_parts:
             # The template's text around {caption}, applied to the layout summary's caption.
             prefix = cfg.annotation_attribution_template.split("{caption}")[0].format(attribution=prefix_parts[0])
-        return annotations.layout(prefix, rng, cfg.layout_item_dropout, cfg.layout_panels) or ""
+        return annotations.layout(prefix, rng, cfg.layout_item_dropout, cfg.layout_panels,
+                                  cfg.layout_short_captions) or ""
     text = annotations.caption(variant) or ""
     if prefix_parts and text:
         return cfg.annotation_attribution_template.format(attribution=prefix_parts[0], caption=text)
