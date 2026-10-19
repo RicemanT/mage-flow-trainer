@@ -494,6 +494,11 @@ SPEC: dict[str, Spec] = {
         "spoon\") instead of the full sentence, so short and detailed box prompts both work. Needs layouts "
         "with short captions (the captioner's layout or shorten mode). 0 = always the full caption.",
         lambda: F.FloatEditor(0.0, 1.0, 0.05, 2)),
+    "dataset.caption.layout_parts": _spec(
+        "Character detail boxes",
+        "Layout boxes for character details (a ribbon, a hat, a worn weapon), given to the model as plain objects. "
+        "Off = only whole characters, standalone objects, text and panels.",
+        lambda: F.BoolEditor("Keep character details"), inline_label=True),
     "dataset.caption.layout_panels": _spec(
         "Panel items in layouts",
         "MageTrail layouts box each comic / collage panel with a caption of what happens in it, beyond MOSS's "
@@ -934,6 +939,7 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
             "dataset.caption.layout_item_dropout",
             "dataset.caption.layout_panels",
             "dataset.caption.layout_short_captions",
+            "dataset.caption.layout_parts",
         ]),
     ]),
     ("Training", [

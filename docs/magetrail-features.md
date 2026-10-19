@@ -147,6 +147,10 @@ Boxes are `[y_min, x_min, y_max, x_max]` normalized to 0-1000 of the original im
   the way people prompt a box ("Reimu", "Marisa holding a spoon on a stool"). `layout_short_captions` (default
   0) is the share of layout samples whose items use the short caption, so both prompting styles are learned;
   0.4-0.5 is a reasonable start. Items without one keep their full caption.
+- **Character details.** Layouts box up to four distinctive details per character (accessories, hair
+  ornaments, hats, worn weapons, standout outfit pieces) as `object` items with `part_of` (their character's
+  index). The model sees plain MOSS objects, so standard object prompts gain fine placement; `layout_parts =
+  false` leaves the details out (to compare, or to back out without re-captioning).
 - Weights left at 0 for the new variants are dropped from the config, so configs that do not use them keep
   their caption-variation cache keys. When they are used, the annotation files and the crop are part of the
   key, so editing a caption builds new slots.

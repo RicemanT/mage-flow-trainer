@@ -158,3 +158,19 @@ def test_short_item_captions(tmp_path):
     assert all(json.loads(build_caption("1girl", None, full, random.Random(s), notes))["items"][0]["caption"]
                == "Hatsune Miku with long teal twintails, waving." for s in range(20))
     assert "layout_short_captions" not in caption_identity(full) and caption_identity(cfg)["layout_short_captions"] == 0.5
+
+
+def test_character_detail_items(tmp_path):
+    layout = {"summary": {"caption": "Reimu."}, "items": [
+        {"label": "character", "caption": "Reimu.", "box_2d": [100, 100, 900, 600]},
+        {"label": "object", "part_of": 0, "caption": "A red ribbon in Reimu's hair.", "box_2d": [100, 200, 200, 500]},
+        {"label": "object", "caption": "A teacup.", "box_2d": [700, 700, 800, 800]}]}
+    write_annotations(tmp_path, layout=layout)
+    notes = Annotations(tmp_path / "img", (1000, 1000), (512, 512))
+    items = json.loads(build_caption("1girl", None, CaptionConfig(caption_mode="layout"), random.Random(0), notes))["items"]
+    assert [i["label"] for i in items] == ["character", "object", "object"]
+    assert all("part_of" not in i for i in items), "the model sees plain MOSS objects"
+    off = CaptionConfig(caption_mode="layout", layout_parts=False)
+    items = json.loads(build_caption("1girl", None, off, random.Random(0), notes))["items"]
+    assert [i["caption"] for i in items] == ["Reimu.", "A teacup."]
+    assert "layout_parts" not in caption_identity(CaptionConfig()) and caption_identity(off)["layout_parts"] is False

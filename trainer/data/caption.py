@@ -92,6 +92,8 @@ class CaptionConfig:
     # Share of layout samples whose items use their `short` caption (a few words, how people prompt a box) instead
     # of the full sentence, so both prompting styles are learned. Items without one keep the full caption.
     layout_short_captions: float = 0.0
+    # Character details (object items with part_of: a ribbon, a hat, a worn weapon); false = leave them out.
+    layout_parts: bool = True
 
     def __post_init__(self):
         if self.caption_mode not in (*_ALL_VARIANTS, "mixed"):
@@ -180,6 +182,8 @@ def caption_identity(cfg: CaptionConfig) -> dict:
         data.pop("layout_panels", None)          # default: keys as before the option existed
     if not cfg.layout_short_captions:
         data.pop("layout_short_captions", None)
+    if cfg.layout_parts:
+        data.pop("layout_parts", None)
     return data
 
 
@@ -290,7 +294,8 @@ def build_caption(
         return ""
 
     variant = select_variant(cfg, bool(nl_text), rng,
-                             annotations.available(cfg.layout_panels) if annotations is not None else frozenset())
+                             annotations.available(cfg.layout_panels, cfg.layout_parts) if annotations is not None
+                             else frozenset())
     if variant in _ANNOTATION_VARIANTS:
         return _build_annotation(tags_text, variant, cfg, annotations, rng)
 
@@ -449,7 +454,7 @@ def _build_annotation(tags_text: str, variant: str, cfg: CaptionConfig, annotati
             # The template's text around {caption}, applied to the layout summary's caption.
             prefix = cfg.annotation_attribution_template.split("{caption}")[0].format(attribution=prefix_parts[0])
         return annotations.layout(prefix, rng, cfg.layout_item_dropout, cfg.layout_panels,
-                                  cfg.layout_short_captions) or ""
+                                  cfg.layout_short_captions, cfg.layout_parts) or ""
     text = annotations.caption(variant) or ""
     if prefix_parts and text:
         return cfg.annotation_attribution_template.format(attribution=prefix_parts[0], caption=text)

@@ -17,7 +17,8 @@ without the file a variant needs falls back to its NL caption, then to its tags.
 
 Besides MOSS's `character` / `object` / `text` items, MageTrail layouts carry `panel` items (a comic or collage
 panel with a caption of what happens in it), an extension the fine-tune learns; `layout_panels = false` leaves
-them out.
+them out. Character details (a ribbon, a hat, a worn weapon) are `object` items with `part_of` (the index of their
+character): the model sees plain objects; `layout_parts = false` leaves them out.
 """
 from __future__ import annotations
 
@@ -64,16 +65,16 @@ class Annotations:
         return " ".join(text.split()) if isinstance(text, str) and text.strip() else None
 
     def layout(self, summary_prefix: str = "", rng: random.Random | None = None, item_dropout: float = 0.0,
-               panels: bool = True, short_share: float = 0.0) -> str | None:
+               panels: bool = True, short_share: float = 0.0, parts: bool = True) -> str | None:
         self._load()
         if not isinstance(self._layout, dict) or not all(self.source_size) or not all(self.bucket):
             return None
         return compile_layout(self._layout, self.source_size, self.bucket, summary_prefix, rng, item_dropout, panels,
-                              short_share)
+                              short_share, parts)
 
-    def available(self, panels: bool = True) -> set[str]:
+    def available(self, panels: bool = True, parts: bool = True) -> set[str]:
         out = {kind for kind in ("short", "medium", "long") if self.caption(kind)}
-        if self.layout(panels=panels) is not None:
+        if self.layout(panels=panels, parts=parts) is not None:
             out.add("layout")
         return out
 
@@ -108,7 +109,7 @@ def drop_items(items: list, rng: random.Random, item_dropout: float) -> list:
 
 def compile_layout(layout: dict, source_size, bucket, summary_prefix: str = "",
                    rng: random.Random | None = None, item_dropout: float = 0.0, panels: bool = True,
-                   short_share: float = 0.0) -> str | None:
+                   short_share: float = 0.0, parts: bool = True) -> str | None:
     """MOSS's model-facing layout prompt for one training crop, or None when no item survives the crop.
     With `item_dropout` (and an `rng`), a random share of the surviving items is left out (`drop_items`). With
     `short_share`, that share of samples gives every item that has one its `short` caption ("Marisa holding a
@@ -123,6 +124,8 @@ def compile_layout(layout: dict, source_size, bucket, summary_prefix: str = "",
         if not isinstance(box, list) or len(box) != 4 or item.get("label") not in LAYOUT_LABELS:
             continue
         if item["label"] == "panel" and not panels:
+            continue
+        if "part_of" in item and not parts:
             continue
         y0, x0, y1, x1 = (box[0] / 1000 * height * scale - top, box[1] / 1000 * width * scale - left,
                           box[2] / 1000 * height * scale - top, box[3] / 1000 * width * scale - left)
