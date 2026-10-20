@@ -11,6 +11,7 @@ Progress: /root/work/pipeline/status.txt. Logs: /root/work/logs/<run>.log.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -193,7 +194,10 @@ def chain(letter, batches):
         if code != 0 or not final.exists():
             status(f"stage {res} FAILED (exit {code}); see {LOGS / (run + '.log')}")
             return "failed"
-        status(f"stage {res} done: {final.name}")
+        # A finished stage is never resumed: its optimizer states (~30 GB each) go, its weights stay.
+        for state_dir in (OUT / run).glob(f"{run}-*-state"):
+            shutil.rmtree(state_dir, ignore_errors=True)
+        status(f"stage {res} done: {final.name} (optimizer states removed)")
         previous = final
     return "done"
 
