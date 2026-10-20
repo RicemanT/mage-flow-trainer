@@ -174,3 +174,11 @@ def test_character_detail_items(tmp_path):
     items = json.loads(build_caption("1girl", None, off, random.Random(0), notes))["items"]
     assert [i["caption"] for i in items] == ["Reimu.", "A teacup."]
     assert "layout_parts" not in caption_identity(CaptionConfig()) and caption_identity(off)["layout_parts"] is False
+
+
+def test_sampler_reads_each_family_latent_channels():
+    from types import SimpleNamespace
+    from trainer.training.sampling import latent_channels
+    assert latent_channels(SimpleNamespace(in_channels=128)) == 128                       # Mage-Flow
+    assert latent_channels(SimpleNamespace(params=SimpleNamespace(latent_channels=128))) == 128   # MOSS-Image
+    assert latent_channels(SimpleNamespace(params=SimpleNamespace(channels=64))) == 64    # Flux3

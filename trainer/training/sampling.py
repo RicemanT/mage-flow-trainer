@@ -68,6 +68,18 @@ def sample_texts(sampling_cfg) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def latent_channels(model) -> int:
+    """The model's latent channel count: Mage-Flow keeps it as `in_channels`, MOSS-Image and Flux3 in their
+    params (`latent_channels` / `channels`)."""
+    if hasattr(model, "in_channels"):
+        return int(model.in_channels)
+    params = getattr(model, "params", None)
+    for name in ("latent_channels", "channels", "in_channels"):
+        if hasattr(params, name):
+            return int(getattr(params, name))
+    raise AttributeError(f"{type(model).__name__} does not say how many latent channels it takes")
+
+
 @torch.no_grad()
 def denoise(model, encode, settings: dict, seed: int, device, dtype,
             keep_fraction: float | None = None) -> torch.Tensor:
@@ -77,7 +89,7 @@ def denoise(model, encode, settings: dict, seed: int, device, dtype,
     """
     h, w = settings["height"] // 16, settings["width"] // 16
     generator = torch.Generator(device="cpu").manual_seed(seed)
-    x = torch.randn(1, model.in_channels, 1, h, w, generator=generator,
+    x = torch.randn(1, latent_channels(model), 1, h, w, generator=generator,
                     dtype=torch.float32).to(device)
     sigmas = build_sigmas(settings["steps"], float(settings["shift"])).tolist()
     use_cfg = settings["cfg"] > 1.0
