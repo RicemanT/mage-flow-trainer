@@ -45,6 +45,15 @@ def status(line):
         f.write(text + "\n")
 
 
+def deadline():
+    """The cutoff: /root/work/pipeline/deadline (an ISO time, e.g. 2026-10-24T09:00:00+00:00) when present, so it
+    can change while the pipeline runs; otherwise PIPELINE_DEADLINE."""
+    try:
+        return datetime.fromisoformat((STATE / "deadline").read_text().strip())
+    except (OSError, ValueError):
+        return DEADLINE
+
+
 def winner():
     try:
         value = (STATE / "winner").read_text().strip().upper()
@@ -130,7 +139,7 @@ def train(config, run, stop_when=None):
         while proc.poll() is None:
             time.sleep(POLL)
             if reason is None:
-                if now() >= DEADLINE - STOP_BEFORE:
+                if now() >= deadline() - STOP_BEFORE:
                     reason = "deadline"
                 elif stop_when:
                     reason = stop_when()
@@ -205,7 +214,8 @@ def chain_check():
 
 
 def main():
-    status(f"pipeline started; deadline {DEADLINE:%m-%d %H:%M} UTC, stops {int(STOP_BEFORE.total_seconds() // 60)} min before")
+    status(f"pipeline started; deadline {deadline():%m-%d %H:%M} UTC (change: {STATE / 'deadline'}), "
+           f"stops {int(STOP_BEFORE.total_seconds() // 60)} min before")
     wait_for_speed_test()
     batches = pick_batches()
     status("batch sizes: " + ", ".join(f"{r} px {b}" for r, b in batches.items()) + " (grad accum 4)")
