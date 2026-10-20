@@ -182,3 +182,30 @@ def test_sampler_reads_each_family_latent_channels():
     assert latent_channels(SimpleNamespace(in_channels=128)) == 128                       # Mage-Flow
     assert latent_channels(SimpleNamespace(params=SimpleNamespace(latent_channels=128))) == 128   # MOSS-Image
     assert latent_channels(SimpleNamespace(params=SimpleNamespace(channels=64))) == 64    # Flux3
+
+
+def test_moss_sample_decoder_unpacks_flux2_latents_in_float32(monkeypatch):
+    import torch
+    from types import SimpleNamespace
+    import trainer.modeling.loader as loader
+    from trainer.training import sampling
+
+    seen = {}
+
+    class FakeVAE(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.bn = torch.nn.BatchNorm2d(128)
+
+        def decode(self, z):
+            seen["shape"], seen["dtype"] = tuple(z.shape), z.dtype
+            return SimpleNamespace(sample=torch.zeros(1, 3, z.shape[-2] * 8, z.shape[-1] * 8))
+
+    monkeypatch.setattr(loader, "load_components", lambda *a, **k: SimpleNamespace(vae=FakeVAE()))
+    monkeypatch.setattr(loader, "resolve_model_family", lambda path, family: family)
+    cfg = SimpleNamespace(model_path="moss", model_family="moss_image", flux2_vae=False, vae_path=None)
+    monkeypatch.setattr(loader, "model_load_kwargs", lambda c: {"vae_path": None, "flux2_vae": False})
+    decoder = sampling.Decoder(cfg, torch.bfloat16)
+    image = decoder(torch.zeros(1, 128, 1, 4, 6, dtype=torch.bfloat16), "cpu")
+    assert seen == {"shape": (1, 32, 8, 12), "dtype": torch.float32}, seen
+    assert image.size == (96, 64)

@@ -140,8 +140,12 @@ class Decoder:
             load_tokenizers=False, load_vae=True, vae_decoder=True,
             **{k: kwargs[k] for k in ("vae_path", "flux2_vae")},
         ).vae.to("cpu")
-        self.flux2 = bool(train_cfg.flux2_vae)
-        self.dtype = dtype
+        # MOSS-Image and Flux3 always use the FLUX.2 VAE (packed 128c/16x training latents) and run it in
+        # float32, whatever train.flux2_vae says.
+        from ..modeling.loader import resolve_model_family
+        packed_family = resolve_model_family(train_cfg.model_path, train_cfg.model_family) in ("flux3", "moss_image")
+        self.flux2 = bool(train_cfg.flux2_vae) or packed_family
+        self.dtype = torch.float32 if packed_family else dtype
 
     @torch.no_grad()
     def __call__(self, latents: torch.Tensor, device):
