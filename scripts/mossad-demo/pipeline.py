@@ -148,6 +148,9 @@ def make_config(res, letter, batch, epochs, save_every, sample_every, transforme
         if n != count:
             raise ValueError(f"config template: {pattern!r} matched {n} times, expected {count}")
 
+    # varlen + packing always (no padding, mixed resolutions in one batch): refuse a template without them
+    sub(r'^attention_backend = "torch_varlen"$', 'attention_backend = "torch_varlen"')
+    sub(r"^pack_resolutions = true$", "pack_resolutions = true")
     sub(r"^resolution = 512$", f"resolution = {res}")
     sub(r"^run_name = .*$", f'run_name = "{run_name(res, letter)}"')
     sub(r"^epochs = 70$", f"epochs = {epochs}")
