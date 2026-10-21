@@ -7,6 +7,10 @@
 Writing B into the winner file at any time stops the current A run (save-and-quit) and continues B instead.
 A deadline watchdog sends save-and-quit in time for the last checkpoint to upload before the droplet goes.
 Progress: /root/work/pipeline/status.txt. Logs: /root/work/logs/<run>.log.
+
+Later stages' lengths can change while it runs: /root/work/pipeline/plan.json, e.g. {"768": {"epochs": 45}}
+(keys epochs / save_every / sample_every), read when a stage starts or resumes. Restarting the pipeline is safe:
+it first waits for a trainer that is already running (the deadline and switch watchdogs still apply to it).
 """
 import json
 import os
@@ -23,6 +27,7 @@ TEMPLATE = WORK / "configs/MossAD-Demo-512-lr5e5.toml"
 OUT, LOGS, STATE = WORK / "output", WORK / "logs", WORK / "pipeline"
 RESULTS = WORK / "speed/results2.txt"
 TRAIN = os.environ.get("PIPELINE_TRAIN", f"{sys.executable} -m trainer.training.train").split()
+TRAIN_MARKER = os.environ.get("PIPELINE_TRAIN_MARKER", "trainer.training.train")   # how a running trainer is recognised
 TRAINER_DIR = os.environ.get("PIPELINE_TRAINER_DIR", "/root/work/mage-flow-trainer")
 DEADLINE = datetime.fromisoformat(os.environ.get("PIPELINE_DEADLINE", "2026-10-23T23:00:00+00:00"))
 STOP_BEFORE = timedelta(minutes=int(os.environ.get("PIPELINE_STOP_MINUTES", "45")))
@@ -65,6 +70,55 @@ def winner():
 
 def run_name(res, letter):
     return f"MossAD-Demo-{res}-{LRS[letter][0]}"
+
+
+def stage_plan():
+    """STAGES with /root/work/pipeline/plan.json's overrides applied."""
+    try:
+        overrides = json.loads((STATE / "plan.json").read_text())
+    except (OSError, ValueError):
+        overrides = {}
+    plan = []
+    for res, epochs, save_every, sample_every in STAGES:
+        o = overrides.get(res, {}) if isinstance(overrides, dict) else {}
+        plan.append((res, int(o.get("epochs", epochs)), int(o.get("save_every", save_every)),
+                     int(o.get("sample_every", sample_every))))
+    return plan
+
+
+def running_trainers():
+    """{pid: run name} of trainer processes already running (data-loader workers included)."""
+    import psutil
+    found = {}
+    for proc in psutil.process_iter(["pid", "cmdline"]):
+        args = proc.info.get("cmdline") or []
+        if proc.pid != os.getpid() and any(TRAIN_MARKER in a for a in args):
+            config = next((a for a in args if a.endswith(".toml")), None)
+            if config:
+                found[proc.pid] = Path(config).stem
+    return found
+
+
+def adopt():
+    """Wait for a trainer started by an earlier pipeline, watching it like our own. False when it was stopped
+    for the deadline."""
+    told, reason = set(), None
+    while procs := running_trainers():
+        run = next(iter(procs.values()))
+        if run not in told:
+            status(f"waiting for the already running {run}")
+            told.add(run)
+        if reason is None:
+            letter = next((k for k, (name, _) in LRS.items() if run.endswith(name)), None)
+            if now() >= deadline() - STOP_BEFORE:
+                reason = "deadline"
+            elif letter and (STATE / "lr_test_B.done").exists() and winner() != letter:
+                reason = "switching to " + winner()
+            if reason:
+                (OUT / run / "save_quit").touch()
+                status(f"{run}: save-and-quit ({reason})")
+        time.sleep(POLL)
+    return reason != "deadline"
 
 
 def wait_for_speed_test():
@@ -174,10 +228,14 @@ def lr_test(letter, batches):
 def chain(letter, batches):
     """The full stage plan for one LR. Returns 'done', 'switch', 'deadline' or 'failed'."""
     previous = None
-    for res, epochs, save_every, sample_every in STAGES:
+    for index in range(len(STAGES)):
+        res, epochs, save_every, sample_every = stage_plan()[index]
         run = run_name(res, letter)
         final = OUT / run / f"{run}.safetensors"
         if final.exists():
+            # Finished, possibly by a trainer an earlier pipeline started: its optimizer states can go.
+            for state_dir in (OUT / run).glob(f"{run}-*-state"):
+                shutil.rmtree(state_dir, ignore_errors=True)
             previous = final
             continue
         state = latest_state(run)
@@ -205,7 +263,7 @@ def chain(letter, batches):
 def chain_check():
     """Stage 2 starts from stage 1's exported checkpoint: load the smoke test's export the same way, once."""
     smoke = WORK / "smoke/out/smoke/smoke.safetensors"
-    if os.environ.get("PIPELINE_SKIP_CHAIN_CHECK") or not smoke.exists():
+    if os.environ.get("PIPELINE_SKIP_CHAIN_CHECK") or not smoke.exists() or (STATE / "chain_check.done").exists():
         return
     try:
         import torch
@@ -213,6 +271,7 @@ def chain_check():
         from trainer.modeling.moss_loader import load_transformer
         load_transformer(WORK / "moss-image-base", smoke, torch.bfloat16)
         status("chain check: an exported checkpoint loads as transformer_path")
+        (STATE / "chain_check.done").touch()
     except Exception as exc:   # stage 2 would fail later; stage 1 can still run
         status(f"chain check FAILED: {type(exc).__name__}: {exc}")
 
@@ -220,6 +279,9 @@ def chain_check():
 def main():
     status(f"pipeline started; deadline {deadline():%m-%d %H:%M} UTC (change: {STATE / 'deadline'}), "
            f"stops {int(STOP_BEFORE.total_seconds() // 60)} min before")
+    if not adopt():
+        status("stopped for the deadline; last checkpoint saved")
+        return
     wait_for_speed_test()
     batches = pick_batches()
     status("batch sizes: " + ", ".join(f"{r} px {b}" for r, b in batches.items()) + " (grad accum 4)")
