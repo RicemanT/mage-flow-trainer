@@ -75,4 +75,10 @@ cache-instant-nl-2gpu.py
 # Local MOSS weights and upstream reference checkout
 /moss-image/
 /MOSS-Image/
+/KohakuMossTrainer/
+/lora_alpha_edit.py
+# Local experiments and downloaded model repository.
+/moss.toml
+/nihilog.txt
+/sft/
 !configs/moss-image-*-experimental.toml

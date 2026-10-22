@@ -33,18 +33,20 @@ from .widgets import (
     set_role,
 )
 
+# Parse fields independently: auxiliary losses and diagnostics can be inserted
+# between them without making the entire step disappear from the graphs.
+NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
 STEP_RE = re.compile(
     r"^e(?P<epoch>\d+)\s+step\s+(?P<step>\d+)/(?P<total>\d+)"
     r"(?:\s+\((?P<pct>\d+)%\))?"
-    r"\s+loss\s+(?P<loss>[\d.eE+-]+)"
-    r"(?:\s+\(mse\s+(?P<mse>[\d.eE+-]+)\s+\+\s+hf\s+(?P<hf>[\d.eE+-]+)\))?"
-    r"(?:\s+ot\s+(?P<ot>[\d.]+))?"
-    # Slash-joined when [component_lr] gives groups different rates, exactly like
-    # `peak A/B GB` does for per-rank memory: "lr 4.00e-05/1.00e-05/8.00e-06".
-    r"\s+lr\s+(?P<lr>[\d.eE+-]+(?:/[\d.eE+-]+)*)"
-    r"\s+(?P<sit>[\d.]+)s/it"
-    r"\s+peak\s+(?P<peak>[\d./]+)GB"
-    r"(?:\s+eta\s+(?P<eta>\S+))?"
+    rf"(?=[^\r\n]*?\bloss\s+(?P<loss>{NUMBER})(?=\s|$))"
+    rf"(?=[^\r\n]*?\blr\s+(?P<lr>{NUMBER}(?:/{NUMBER})*)(?=\s|$))"
+    rf"(?=[^\r\n]*?\s(?P<sit>{NUMBER})s/it(?=\s|$))"
+    rf"(?=[^\r\n]*?\bpeak\s+(?P<peak>{NUMBER}(?:/{NUMBER})*)GB(?=\s|$))"
+    rf"(?:(?=[^\r\n]*?\(mse\s+(?P<mse>{NUMBER})\s+\+\s+hf\s+(?P<hf>{NUMBER})\)))?"
+    rf"(?:(?=[^\r\n]*?\bot\s+(?P<ot>{NUMBER})(?=\s|$)))?"
+    r"(?:(?=[^\r\n]*?\beta\s+(?P<eta>\S+)))?"
+    r"[^\r\n]*$"
 )
 
 # Startup summary lines worth surfacing on the metrics tab rather than leaving in the console.

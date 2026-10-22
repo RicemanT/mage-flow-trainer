@@ -163,7 +163,7 @@ class Trainer:
             mixed_precision="no",
             dynamo_plugin=self._dynamo_plugin(),
         )
-        if cfg.quant.mode == "training" and self.accelerator.num_processes > 1:
+        if (cfg.quant.mode == "training" or cfg.quant.backend == "convrot") and self.accelerator.num_processes > 1:
             from .distributed import configure_quantized_ddp
             self.accelerator.ddp_handler = configure_quantized_ddp()
         # `device_specific=True` adds the process index to the seed, so ranks do not start from an
@@ -267,6 +267,9 @@ class Trainer:
             self.accelerator.print(f'Self-Flow enabled: block 4 -> 8, EMA {sf.ema_dtype} on {sf.ema_device}, '
                                   f'FP32 AdaLN={sf.adaln_fp32}, storage {self.self_flow_ema.nbytes / 2**30:.2f} GiB')
 
+        self.successful_updates = 0
+        self.skipped_updates = 0
+        self.consecutive_nonfinite = 0
         self.global_step = 0
         self.start_epoch = 0
         self.resume_skip_batches = 0
@@ -282,6 +285,8 @@ class Trainer:
     def _build_data(self) -> None:
         cfg = self.cfg
         self.dataset = MageFlowDataset(cfg.dataset, caption_seed=cfg.train.seed)
+        from ..data.cache_provenance import validate_dataset_caches
+        validate_dataset_caches(self.dataset, cfg.train, cfg.dataset.cache_validation)
         from ..data.packed import NativeResolutionBatchSampler, collate_native
         sampler_cls = NativeResolutionBatchSampler if cfg.train.pack_resolutions else BucketBatchSampler
         self.sampler = sampler_cls(
@@ -414,7 +419,11 @@ class Trainer:
 
         self.transformer.configure_execution(
             cfg.train.gradient_checkpointing, cfg.train.checkpoint_blocks,
-            cfg.train.compile, cfg.train.compile_dynamic, cfg.train.attention_backend)
+            cfg.train.compile, cfg.train.compile_dynamic, cfg.train.attention_backend,
+            activation_offload=cfg.train.activation_offload,
+            activation_offload_budget_mb=cfg.train.activation_offload_budget_mb,
+            activation_offload_pin_memory=cfg.train.activation_offload_pin_memory,
+            activation_offload_prefetch=cfg.train.activation_offload_prefetch)
         self.groups = groups
         if cfg.self_flow.enabled:
             from types import MethodType
@@ -497,7 +506,7 @@ class Trainer:
 
     def _prepare(self):
         raw_optimizer = self.optimizer
-        if self.cfg.quant.mode == "training" and self.accelerator.num_processes > 1:
+        if (self.cfg.quant.mode == "training" or self.cfg.quant.backend == "convrot") and self.accelerator.num_processes > 1:
             from .distributed import sync_quantized_model
             sync_quantized_model(self.transformer)
         if self.text_encoder is not None:
@@ -872,11 +881,21 @@ class Trainer:
         cfg = self.cfg
         acc = self.accelerator
         self._report()
+        offloader = getattr(self._unwrap(self.transformer), '_activation_offloader', None)
+        if offloader is not None:
+            _emit(self, f"activation offload: {offloader.budget_bytes / 2**20:.0f} MiB live payload/rank, "
+                       f"pin={offloader.pin_memory}, prefetch={offloader.prefetch}; excess inputs stay on GPU")
 
         if cfg.optimizer.gradient_release:
             _emit(self, "optim    gradient release enabled (single GPU; updates during backward)")
         trainable = [p for p in self._all_modules_params() if p.requires_grad]
         done = False
+        from .step_safety import global_sample_scale, scale_gradients, gradient_norm, globally_finite
+        local_samples = 0
+        finite_losses = torch.ones((), dtype=torch.bool, device=acc.device)
+        loss_sum = torch.zeros((), device=acc.device)
+        hf_sum = torch.zeros((), device=acc.device)
+        hf_present = False
 
         if self.progress_mode == "bar":
             self.bar = tqdm(
@@ -904,31 +923,77 @@ class Trainer:
                     loss, hf = self._step(batch)
                     if cfg.optimizer.gradient_release:
                         self._apply_lr_mul()  # Hook updates happen inside backward.
-                    acc.backward(loss)
-
-                    if acc.sync_gradients and cfg.optimizer.max_grad_norm > 0:
-                        acc.clip_grad_norm_(trainable, cfg.optimizer.max_grad_norm)
-
-                    if not cfg.optimizer.gradient_release:
-                        self._apply_lr_mul()
-                    if cfg.optimizer.gradient_release:
-                        pass  # Already stepped and cleared each parameter during backward.
-                    elif cfg.quant.mode == "training" and acc.num_processes > 1 and acc.sync_gradients:
-                        from .distributed import quantized_optimizer_rng
-                        with quantized_optimizer_rng(acc.device, cfg.train.seed, self.global_step):
-                            self.optimizer.step()
-                    else:
-                        self.optimizer.step()
-                    self.scheduler.step()
-                    self.optimizer.zero_grad(set_to_none=True)
+                    samples = len(batch["captions"])
+                    local_samples += samples
+                    finite_losses &= torch.isfinite(loss.detach())
+                    loss_sum += loss.detach().float() * samples
+                    if hf is not None:
+                        hf_sum += hf.detach().float() * samples
+                        hf_present = True
+                    if cfg.optimizer.gradient_release and not bool(finite_losses.item()):
+                        raise FloatingPointError("Nonfinite loss before gradient-release backward")
+                    # Accelerate divides by accumulation_steps; DDP averages ranks.
+                    # Restore an equal-per-image mean across the entire update below.
+                    acc.backward(loss if cfg.optimizer.gradient_release else loss * samples)
+                    update_ok = False
+                    if acc.sync_gradients:
+                        if not cfg.optimizer.gradient_release:
+                            scale = global_sample_scale(local_samples, cfg.train.gradient_accumulation_steps, acc.device)
+                            scale_gradients(trainable, scale)
+                            self.last_grad_norm = gradient_norm(trainable, acc.device).detach()
+                            update_ok = globally_finite(finite_losses, self.last_grad_norm)
+                        else:
+                            update_ok = True  # Per-parameter guards run before optimizer hooks.
+                        if update_ok:
+                            if not cfg.optimizer.gradient_release:
+                                if cfg.optimizer.max_grad_norm > 0:
+                                    torch.nn.utils.clip_grad_norm_(trainable, cfg.optimizer.max_grad_norm)
+                                self._apply_lr_mul()
+                                if acc.num_processes > 1:
+                                    from .distributed import quantized_optimizer_rng
+                                    with quantized_optimizer_rng(acc.device, cfg.train.seed, self.global_step):
+                                        self.optimizer.step()
+                                else:
+                                    self.optimizer.step()
+                            self.scheduler.step()
+                            self.successful_updates += 1
+                            self.consecutive_nonfinite = 0
+                        else:
+                            self.skipped_updates += 1
+                            self.consecutive_nonfinite += 1
+                            from .step_safety import nonfinite_names
+                            bad_names = nonfinite_names(self._unwrap(self.transformer).named_parameters())
+                            reports = [None] * acc.num_processes
+                            if acc.num_processes > 1:
+                                torch.distributed.all_gather_object(reports, bad_names)
+                            else:
+                                reports[0] = bad_names
+                            _emit(self, f"Nonfinite gradients by rank (first eight names): {reports}")
+                            _emit(self, f"Skipped nonfinite update {self.global_step + 1}; "
+                                       f"consecutive={self.consecutive_nonfinite}")
+                        self.optimizer.zero_grad(set_to_none=True)
 
                 if not acc.sync_gradients:
                     continue
 
-                if self.self_flow_ema is not None and not acc.optimizer_step_was_skipped:
+                if update_ok and self.self_flow_ema is not None and not acc.optimizer_step_was_skipped:
                     from .distributed import quantized_optimizer_rng
                     with quantized_optimizer_rng(acc.device, cfg.train.seed + 7919, self.global_step):
                         self.self_flow_ema.update()
+                # Log the same global image-weighted loss that supplies the gradients.
+                totals = torch.stack((loss_sum, loss_sum.new_tensor(local_samples), hf_sum,
+                                      loss_sum.new_tensor(hf_present)))
+                if acc.num_processes > 1:
+                    torch.distributed.all_reduce(totals)
+                loss = totals[0] / totals[1]
+                hf = totals[2] / totals[1] if totals[3].item() else None
+                hf_sum.zero_()
+                hf_present = False
+                local_samples = 0
+                finite_losses.fill_(True)
+                loss_sum.zero_()
+                if self.consecutive_nonfinite >= cfg.train.nonfinite_patience:
+                    raise FloatingPointError("Repeated nonfinite updates; stopped before saving invalid training")
 
                 self.global_step += 1
                 if self.bar is not None:
@@ -978,6 +1043,10 @@ class Trainer:
             if acc.is_main_process:
                 path = Path(cfg.train.output_dir)/cfg.train.run_name/'eye-discriminator.safetensors'
                 save_file(state,str(path))
+        if offloader is not None:
+            stats = acc.gather(torch.tensor([[offloader.peak_bytes / 2**20,
+                offloader.offloaded_tensors, offloader.budget_fallbacks]], device=acc.device))
+            acc.print(f'activation offload per rank [peak host MiB, copies, budget fallbacks]: {stats.tolist()}')
         acc.end_training()
 
     def _log(
@@ -1029,6 +1098,11 @@ class Trainer:
             parts += f"  sf {self.last_stats['self_flow_alignment']:.4f}"
         if hf_value is not None:
             parts += f" (mse {value - hf_value:.4f} + hf {hf_value:.4f})"
+        if getattr(self, "last_grad_norm", None) is not None:
+            grad_norm = self.last_grad_norm.item()
+            clip_factor = (min(1.0, self.cfg.optimizer.max_grad_norm / (grad_norm + 1e-6))
+                           if self.cfg.optimizer.max_grad_norm > 0 else 1.0)
+            parts += f"  grad {grad_norm:.3g}  clip {clip_factor:.3f}"
         # Fraction of rows optimal transport actually reordered. 0.00 means it is doing nothing --
         # either the batch is 1, or the pairing happened to be optimal already.
         if "ot_moved" in getattr(self, "last_stats", {}):
@@ -1120,9 +1194,13 @@ class Trainer:
         if self.quant_info is not None:
             nq, ntotal, use_qmm, max_tokens, wmean = self.quant_info
             how = "auto" if cfg.quant.use_quantized_matmul == "auto" else "explicit"
-            print(f"quant    {cfg.quant.mode}/{cfg.quant.weights_dtype}, {nq}/{ntotal} Linear "
-                  f"quantized, skip={cfg.quant.skip_policy}")
-            print(f"         quantized matmul {'ON' if use_qmm else 'OFF'} ({how}; auto defaults to off)")
+            if cfg.quant.backend == "convrot":
+                print(f"quant    ConvRot frozen/int8, {nq}/{ntotal} Linear quantized, "
+                      f"skip={cfg.quant.skip_policy}; INT8 matmul ON, rotation group 256")
+            else:
+                print(f"quant    {cfg.quant.mode}/{cfg.quant.weights_dtype}, {nq}/{ntotal} Linear "
+                      f"quantized, skip={cfg.quant.skip_policy}")
+                print(f"         quantized matmul {'ON' if use_qmm else 'OFF'} ({how}; auto defaults to off)")
         f = cfg.flow
         flow_bits = [f.timestep_sample_method]
         if f.timestep_sample_method == "logit_normal":
@@ -1243,11 +1321,15 @@ class Trainer:
         runtime = optimizer_snapshot(self.optimizer)
         runtime.update(
             save_tag=tag,
+            successful_updates=self.successful_updates, skipped_updates=self.skipped_updates,
             source_checkpoint=self.source_checkpoint,
             world_size=acc.num_processes,
             effective_batch_size=(cfg.train.batch_size * cfg.train.gradient_accumulation_steps
                                   * acc.num_processes),
         )
+        offloader = getattr(transformer, '_activation_offloader', None)
+        if offloader is not None:
+            runtime['activation_offload_peak_host_bytes_rank0'] = offloader.peak_bytes
         if self.rti_interface is not None:
             runtime.update(rti_keep_fraction=self.keep_fraction, rti_phase=self.rti_phase)
         n = export_checkpoint(transformer, dest, stem, cfg, self.dtype, self.global_step,
@@ -1260,6 +1342,7 @@ class Trainer:
         if cfg.train.save_optimizer_state:
             (self.out_dir / f"{stem}-state" / "state.json").write_text(
                 json.dumps({"global_step": self.global_step, "tensors": n,
+                            "successful_updates": self.successful_updates, "skipped_updates": self.skipped_updates,
                             "source_checkpoint": self.source_checkpoint}, indent=2)
             )
         _emit(self, f"saved {written} ({n} tensors)")
@@ -1376,6 +1459,8 @@ class Trainer:
 
         saved_state = json.loads(state_file.read_text())
         self.global_step = saved_state["global_step"]
+        self.skipped_updates = saved_state.get("skipped_updates", 0)
+        self.successful_updates = saved_state.get("successful_updates", self.global_step - self.skipped_updates)
         if saved_state.get('source_checkpoint') is not None:
             self.source_checkpoint = saved_state['source_checkpoint']
         elif self.source_checkpoint is not None:

@@ -32,6 +32,7 @@ class QuantConfig:
     """Transformer quantization settings; the frozen encoder has its own toggle."""
 
     mode: str = "none"  # "none" | "frozen" | "training"
+    backend: str = "sdnq"  # Transformer only; the text encoder always uses SDNQ.
     weights_dtype: str = (
         "int8"  # int8 default: faster than fp8 here, and 2x lower error
     )
@@ -48,6 +49,8 @@ class QuantConfig:
     use_stochastic_rounding: bool = True
 
     def __post_init__(self):
+        if self.backend not in ("sdnq", "convrot"):
+            raise ValueError(f"unknown quant backend: {self.backend!r}")
         if self.mode not in ("none", "frozen", "training"):
             raise ValueError(f"unknown quant mode: {self.mode!r}")
         if self.skip_policy not in SKIP_POLICIES:
@@ -78,6 +81,7 @@ def text_encoder_quant_config(cfg: QuantConfig) -> QuantConfig | None:
     return replace(
         cfg,
         mode="frozen",
+        backend="sdnq",
         weights_dtype=cfg.text_encoder_weights_dtype or cfg.weights_dtype,
         text_encoder_weights_dtype=None,
         skip_policy="default",
@@ -167,6 +171,12 @@ def quantize_module(
 
     module, sdnq_cfg = add_module_skip_keys(module, sdnq_cfg)
 
+    if cfg.backend == "convrot":
+        from .convrot import apply_convrot
+        if cfg.mode != "frozen" or getattr(module, "model_family", None) != "moss_image":
+            raise ValueError("ConvRot requires a frozen MOSS transformer")
+        return apply_convrot(module, sdnq_cfg, device, dtype)
+
     apply = apply_sdnq_training_to_module if is_training else apply_sdnq_to_module
     module, _ = apply(module, sdnq_cfg, torch_dtype=dtype)
     return module
@@ -204,7 +214,7 @@ def quantized_layer_report(module: nn.Module) -> tuple[int, int, list[str]]:
 
     quantized, skipped = 0, []
     for name, m in module.named_modules():
-        if isinstance(m, (SDNQLinear, SDNQLayer)):
+        if isinstance(m, (SDNQLinear, SDNQLayer)) or getattr(m, "_trainer_convrot", False):
             quantized += 1
         elif isinstance(m, nn.Linear):
             skipped.append(name)

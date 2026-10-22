@@ -47,7 +47,8 @@ def config_cache_commands(args):
                    "--min-bucket-reso", str(cfg.dataset.min_bucket_reso),
                    "--max-bucket-reso", str(cfg.dataset.max_bucket_reso),
                    "--bucket-reso-steps", str(cfg.dataset.bucket_reso_steps),
-                   "--batch-size", str(args.batch_size)]
+                   "--batch-size", str(args.batch_size),
+                   "--cache-validation", cfg.dataset.cache_validation]
         if cfg.train.vae_path:
             command += ["--vae-path", cfg.train.vae_path]
         if cfg.train.flux2_vae:
@@ -189,7 +190,10 @@ def cmd_cache(args) -> int:
         flux2_vae=args.flux2_vae,
         load_text_encoder=False, load_vae=True, load_tokenizers=False, load_transformer=False,
     )
-    cacher = LatentCacher(components.vae, device=args.device, flux2_vae=args.flux2_vae)
+    from ..data.cache_provenance import vae_identity
+    provenance = vae_identity(args.model_path, args.vae_path, args.model_family, args.flux2_vae)
+    cacher = LatentCacher(components.vae, device=args.device, flux2_vae=args.flux2_vae,
+                          provenance=provenance, cache_validation=args.cache_validation)
 
     work: dict[tuple[int, tuple[int, int]], list[Path]] = {}
     for path in files:
@@ -202,9 +206,8 @@ def cmd_cache(args) -> int:
             batch = paths[start:start + args.batch_size]
             pending = [path for path in batch if args.overwrite or not cache_path(path, bucket).exists()]
             skipped += len(batch) - len(pending)
-            if pending:
-                cacher.cache_batch(pending, managers[tier], overwrite=args.overwrite)
-                done += len(pending)
+            written = cacher.cache_batch(batch, managers[tier], overwrite=args.overwrite)
+            done += len(written)
             seen += len(batch)
             if seen % 25 < len(batch) or seen == total:
                 print(f"  {seen}/{total} cache entries  cached {done}, skipped {skipped}", flush=True)
@@ -329,6 +332,7 @@ def main() -> int:
     c.add_argument("path")
     c.add_argument("--model-path", default=DEFAULT_MODEL_PATH)
     c.add_argument("--model-family", choices=["auto", "mage_flow", "flux3", "moss_image"], default="auto")
+    c.add_argument("--cache-validation", choices=("warn", "strict", "off"), default="warn")
     c.add_argument("--vae-path", help="Separate Mage-Flow VAE .safetensors (overrides --model-path)")
     c.add_argument("--flux2-vae", action="store_true", help="Experimental: encode with FLUX.2 VAE, pack 32c/8x to 128c/16x, and apply vae_bn normalization")
     c.add_argument("--resolution", type=int, nargs="+", default=[1024],

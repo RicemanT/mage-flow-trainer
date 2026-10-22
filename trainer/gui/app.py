@@ -98,6 +98,11 @@ _RULES = {
         "dense_prefix_blocks", "dense_suffix_blocks", "size_buckets", "start_keep", "target_keep",
         "identity_steps", "warmup_steps", "anneal_steps", "budget_steps")},
 
+    "train.moss_qkv_format": lambda c: (c.get("train.model_family") in ("auto", "moss_image")
+        and (c.get("adapter.kind") in ("none", "lora") or (c.get("adapter.kind") == "lycoris_lora" and c.get("adapter.lycoris_algo") == "locon"))),
+    "train.activation_offload_budget_mb": lambda c: bool(c.get("train.activation_offload")),
+    "train.activation_offload_pin_memory": lambda c: bool(c.get("train.activation_offload")),
+    "train.activation_offload_prefetch": lambda c: bool(c.get("train.activation_offload")) and bool(c.get("train.activation_offload_pin_memory")),
     "dataset.resolution": lambda c: not c.get("dataset.resolutions"),
     "dataset.tier_collapse": lambda c: bool(c.get("dataset.resolutions")),
     "dataset.min_source_area": lambda c: bool(c.get("dataset.resolutions")),
@@ -145,13 +150,13 @@ _RULES = {
     "train.compile_regional": lambda c: bool(c.get("train.compile")),
 
     "quant.text_encoder_weights_dtype": lambda c: bool(c.get("quant.quantize_text_encoder")),
-    "quant.weights_dtype": lambda c: c.get("quant.mode") != "none" or c.get("quant.quantize_text_encoder"),
-    "quant.use_quantized_matmul": lambda c: c.get("quant.mode") != "none",
+    "quant.weights_dtype": lambda c: (c.get("quant.backend", "sdnq") == "sdnq" and c.get("quant.mode") != "none") or c.get("quant.quantize_text_encoder"),
+    "quant.use_quantized_matmul": lambda c: c.get("quant.backend", "sdnq") == "sdnq" and c.get("quant.mode") != "none",
     "quant.skip_policy": lambda c: c.get("quant.mode") != "none",
     "quant.extra_skip": lambda c: c.get("quant.mode") != "none",
-    "quant.group_size": lambda c: c.get("quant.mode") != "none" or c.get("quant.quantize_text_encoder"),
-    "quant.dynamic_loss_threshold": lambda c: c.get("quant.mode") != "none" or c.get("quant.quantize_text_encoder"),
-    "quant.use_stochastic_rounding": lambda c: c.get("quant.mode") == "training",
+    "quant.group_size": lambda c: (c.get("quant.backend", "sdnq") == "sdnq" and c.get("quant.mode") != "none") or c.get("quant.quantize_text_encoder"),
+    "quant.dynamic_loss_threshold": lambda c: (c.get("quant.backend", "sdnq") == "sdnq" and c.get("quant.mode") != "none") or c.get("quant.quantize_text_encoder"),
+    "quant.use_stochastic_rounding": lambda c: c.get("quant.backend", "sdnq") == "sdnq" and c.get("quant.mode") == "training",
 }
 
 
@@ -909,6 +914,7 @@ class TrainingGUI(QtWidgets.QWidget):
             vae_path=flat.get("train.vae_path"),
             flux2_vae=bool(flat.get("train.flux2_vae")),
             model_family=flat.get("train.model_family") or "auto",
+            cache_validation=flat.get("dataset.cache_validation") or "warn",
             min_bucket_reso=flat.get("dataset.min_bucket_reso") or 256,
             max_bucket_reso=flat.get("dataset.max_bucket_reso") or 1920,
             bucket_reso_steps=flat.get("dataset.bucket_reso_steps") or 64,
@@ -1012,6 +1018,7 @@ class TrainingGUI(QtWidgets.QWidget):
             vae_path=c.get("train.vae_path"),
             flux2_vae=bool(c.get("train.flux2_vae")),
             model_family=c.get("train.model_family") or "auto",
+            cache_validation=c.get("dataset.cache_validation") or "warn",
             min_bucket_reso=c.get("dataset.min_bucket_reso") or 256,
             max_bucket_reso=c.get("dataset.max_bucket_reso") or 1920,
             bucket_reso_steps=c.get("dataset.bucket_reso_steps") or 64,

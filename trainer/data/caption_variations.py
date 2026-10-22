@@ -59,6 +59,7 @@ def _encoder_fingerprint_payload(cfg):
     if quant_payload is not None:
         # Selector metadata is not encoder behavior; preserve existing cache keys.
         quant_payload.pop("text_encoder_weights_dtype", None)
+        quant_payload.pop("backend", None)
     payload = dict(
         version=1,
         versions=versions,
@@ -110,6 +111,7 @@ def encoder_fingerprint(cfg, cache_path=None):
             )
         )
         old_quant.pop("text_encoder_weights_dtype", None)
+        old_quant.pop("backend", None)
         # An explicit encoder override must not reuse the transformer's dtype.
         old_quant["weights_dtype"] = payload["quant"]["weights_dtype"]
         compatible.add(digest({**payload, "quant": old_quant}))

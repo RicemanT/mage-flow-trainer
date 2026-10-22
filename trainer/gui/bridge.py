@@ -285,7 +285,10 @@ def summarize(flat: dict) -> str:
         bits.append("(source=encode with no curriculum: +16% step time for nothing)")
 
     if quant not in (None, "none"):
-        bits.append(f"sdnq {quant}/{flat.get('quant.weights_dtype', 'int8')}")
+        if flat.get("quant.backend", "sdnq") == "convrot":
+            bits.append("convrot frozen/int8 matmul")
+        else:
+            bits.append(f"sdnq {quant}/{flat.get('quant.weights_dtype', 'int8')}")
     if flat.get("train.compile"):
         bits.append(f"compile {flat['train.compile']}")
     return "  ".join(bits)

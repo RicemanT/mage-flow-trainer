@@ -1,4 +1,4 @@
-"""DDP initialization and update randomness for SDNQ training tensors."""
+"""DDP initialization for quantized tensors and SDNQ update randomness."""
 
 from contextlib import contextmanager
 
@@ -23,11 +23,11 @@ def configure_quantized_ddp():
 
 
 def model_storage(module):
-    """Yield ordinary tensors, never SDNQ wrappers, including quantization metadata."""
+    """Yield ordinary storage/scales, never SDNQ or Kitchen tensor wrappers."""
     from sdnq.training import SDNQTensor
 
     for name, value in list(module.named_parameters()) + list(module.named_buffers()):
-        if isinstance(value, SDNQTensor):
+        if isinstance(value, SDNQTensor) or type(value).__module__.startswith("comfy_kitchen.tensor"):
             names, _ = value.__tensor_flatten__()
             for field in names:
                 yield f"{name}.{field}", getattr(value, field)
@@ -49,7 +49,8 @@ def sync_quantized_model(module):
             tuple(p.shape),
             str(p.dtype),
             p.requires_grad,
-            vars(p.sdnq_dequantizer) if isinstance(p, SDNQTensor) else None,
+            (vars(p.sdnq_dequantizer) if isinstance(p, SDNQTensor) else
+             p.__tensor_flatten__()[1] if type(p).__module__.startswith("comfy_kitchen.tensor") else None),
         )
         for name, p in values
     ]
@@ -59,7 +60,7 @@ def sync_quantized_model(module):
     dist.all_gather_object(layouts, layout)
     if any(other != layout for other in layouts):
         raise RuntimeError(
-            "SDNQ model layouts differ across DDP ranks; cannot synchronize safely"
+            "Quantized model layouts differ across DDP ranks; cannot synchronize safely"
         )
     for _, value in storage:
         data = value.detach().contiguous()

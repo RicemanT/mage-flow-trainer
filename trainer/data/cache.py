@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image
-from safetensors.torch import load_file, save_file
+from safetensors.torch import load_file
 
 from .bucket import BucketManager
 
@@ -71,11 +72,14 @@ def image_to_tensor(img: Image.Image) -> torch.Tensor:
 class LatentCacher:
     """Encode Mage-VAE posterior means without additional scaling or normalization."""
 
-    def __init__(self, vae, device: torch.device | str = "cuda", dtype: torch.dtype = torch.bfloat16, flux2_vae: bool = False):
+    def __init__(self, vae, device: torch.device | str = "cuda", dtype: torch.dtype = torch.bfloat16, flux2_vae: bool = False, provenance: dict | None = None, cache_validation: str = "warn"):
         self.vae = vae.to(device).eval()
         self.device = torch.device(device)
         self.dtype = dtype
         self.flux2_vae = flux2_vae
+        self.provenance = (dict(provenance, encode_dtype=str(next(self.vae.parameters()).dtype).removeprefix("torch."))
+                           if provenance is not None else None)
+        self.cache_validation = cache_validation
     @torch.no_grad()
     def encode_tensor(self, x: torch.Tensor) -> torch.Tensor:
         """[B,3,1,H,W] pixels -> [B,128,1,H/16,W/16], without rescaling."""
@@ -93,59 +97,43 @@ class LatentCacher:
     def encode(self, img: Image.Image) -> torch.Tensor:
         return self.encode_tensor(image_to_tensor(img)).squeeze(0).to(torch.float32)  # (128, 1, h, w)
 
-    def cache_image(
-        self, image_path: str | Path, bucket_mgr: BucketManager, overwrite: bool = False
-    ) -> tuple[Path, dict]:
-        img, meta = load_and_crop(image_path, bucket_mgr)
-        out = cache_path(image_path, meta["bucket"])
+    def _metadata(self, image_path, meta):
+        from .cache_provenance import file_sha256
+        result = {
+            "version": CACHE_VERSION,
+            "bucket": f"{meta['bucket'][0]}x{meta['bucket'][1]}",
+            "original_size": f"{meta['original_size'][0]}x{meta['original_size'][1]}",
+            "crop_ltrb": ",".join(str(v) for v in meta["crop_ltrb"]),
+            "source": hashlib.sha256(str(Path(image_path).name).encode()).hexdigest()[:16],
+            "source_sha256": file_sha256(image_path),
+        }
+        if self.provenance is not None:
+            result["cache_provenance"] = json.dumps(dict(self.provenance,
+                encode_dtype=str(next(self.vae.parameters()).dtype).removeprefix('torch.')), sort_keys=True)
+        return result
 
-        if out.exists() and not overwrite:
-            return out, meta
+    def cache_image(self, image_path, bucket_mgr, overwrite=False):
+        _, meta = load_and_crop(image_path, bucket_mgr)
+        self.cache_batch([image_path], bucket_mgr, overwrite)
+        return cache_path(image_path, meta["bucket"]), meta
 
-        latents = self.encode(img)
-        save_file(
-            {"latents": latents.contiguous()},
-            out,
-            metadata={
-                "version": CACHE_VERSION,
-                "bucket": f"{meta['bucket'][0]}x{meta['bucket'][1]}",
-                "original_size": f"{meta['original_size'][0]}x{meta['original_size'][1]}",
-                "crop_ltrb": ",".join(str(v) for v in meta["crop_ltrb"]),
-                "source": hashlib.sha256(str(Path(image_path).name).encode()).hexdigest()[:16],
-            },
-        )
-        return out, meta
-
-    def cache_batch(
-        self, image_paths: list[str | Path], bucket_mgr: BucketManager, overwrite: bool = False
-    ) -> list[tuple[Path, dict]]:
-        """Cache same-bucket images through one VAE forward.
-
-        The caller groups by resolved bucket. Keeping the grouping outside the
-        encoder lets native-resolution datasets retain their normal bucket
-        selection while still amortising VAE launches.
-        """
+    def cache_batch(self, image_paths, bucket_mgr, overwrite=False):
+        """Cache same-bucket images; validate provenance before reusing any file."""
+        from .cache_provenance import validate_cache, atomic_save
         prepared = []
         for image_path in image_paths:
             img, meta = load_and_crop(image_path, bucket_mgr)
             out = cache_path(image_path, meta["bucket"])
-            if overwrite or not out.exists():
+            if not overwrite and out.exists():
+                validate_cache(out, self.provenance, self.cache_validation, source=image_path)
+            else:
                 prepared.append((Path(image_path), out, meta, image_to_tensor(img)))
         if not prepared:
             return []
         latents = self.encode_tensor(torch.cat([row[3] for row in prepared], dim=0))
         written = []
         for (image_path, out, meta, _), latent in zip(prepared, latents):
-            save_file(
-                {"latents": latent.contiguous()}, out,
-                metadata={
-                    "version": CACHE_VERSION,
-                    "bucket": f"{meta['bucket'][0]}x{meta['bucket'][1]}",
-                    "original_size": f"{meta['original_size'][0]}x{meta['original_size'][1]}",
-                    "crop_ltrb": ",".join(str(v) for v in meta["crop_ltrb"]),
-                    "source": hashlib.sha256(str(image_path.name).encode()).hexdigest()[:16],
-                },
-            )
+            atomic_save({"latents": latent.contiguous()}, out, self._metadata(image_path, meta))
             written.append((out, meta))
         return written
 

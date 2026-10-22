@@ -82,6 +82,28 @@ modulation and Qwen3.5-9B final-layer conditioning. Its packaged FLUX.2 VAE has
 an /8 encoder and a smaller decoder; latent packing gives an effective /16 stride.
 Use fresh latent caches with that VAE.
 
+Under **Training → Checkpoints**, **MOSS Q/K/V saving format** defaults to fused
+for full finetunes and plain LoRA/LoCon; separated remains selectable. Other models
+and LoKr/DoRA keep their native layout. Fused LoRA/LoCon exports support loaders that expect
+fused QKV, including the audited Forge loader. Convert an existing adapter with
+`python lora_qkv_convert.py model.safetensors --format fused`, or launch
+`python lora_qkv_convert.py` for a small GUI. It saves a new copy with the same
+effective updates; fused adapters can be larger. See the
+[export guide](docs/moss-image-experimental.md#qkv-saving-format-and-existing-loras).
+
+For an experimental **MOSS LoCon ConvRot** comparison, install the optional kernels
+in the trainer environment (`uv sync --extra gui --extra convrot`, or
+`uv pip install --python .venv/bin/python comfy-kitchen==0.2.37`). Select
+**Transformer quantization backend → ConvRot INT8 (experimental)** in the GUI,
+with frozen mode, BF16 training/adapters, and LyCORIS LoCon bypass enabled.
+Start from native BF16 MOSS weights: the trainer applies per-channel INT8
+quantization with a 256-wide rotation, INT8 forward matmul and BF16 attention.
+The adapter remains in the original weight basis and exports normally.
+Text-encoder quantization and the optimizer remain independent SDNQ options.
+SDNQ transformer storage dtype, matmul, group size and rounding controls do not
+configure ConvRot. Full finetuning and other adapter algorithms are currently
+rejected. This is an experimental speed/quality tradeoff, not lossless training.
+
 Start with the [finetuning preset](configs/moss-image-finetune-experimental.toml)
 or [LoCon preset](configs/moss-image-locon-experimental.toml), both defaulting to
 1024px. Replace dataset and model paths. The [MOSS guide](docs/moss-image-experimental.md) documents the

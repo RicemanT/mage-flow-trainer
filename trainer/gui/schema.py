@@ -90,6 +90,9 @@ SPEC: dict[str, Spec] = {
     "train.attention_backend": _spec("Attention backend", "torch_varlen uses PyTorch's built-in packed attention. SDPA uses padded attention.", lambda: F.ChoiceEditor(["sdpa", "torch_varlen", "flash_attn_2", "flash_attn_3"])),
     "train.max_text_tokens": _spec("Maximum text tokens", "Caption token budget after removing the Qwen3-VL system prefix.", lambda: F.IntEditor(1, 4096)),
     # ------------------------------------------------------------------ train
+    "train.moss_qkv_format": _spec(
+        "MOSS Q/K/V saving format", "Default: fused for MOSS full finetunes and plain LoRA/LoCon; other models and LoKr/DoRA retain their native layout. Fused supports fused-base loaders such as Forge. Plain LoRA/LoCon uses three times the joint QKV rank with equivalent scaling and larger files. Training and optimizer resume state stay native.",
+        lambda: F.ChoiceEditor(["Default (fused for MOSS LoRA/LoCon and finetunes)", "fused", "separated"], values=["auto", "fused", "separated"])),
     "train.model_family": _spec("Model family", "Flux3/MOSS text-to-image support is experimental; select SDPA or torch_varlen attention.", lambda: F.ChoiceEditor(["auto", "mage_flow", "flux3", "moss_image"])),
     "train.model_path": _spec(
         "Model directory",
@@ -137,6 +140,24 @@ SPEC: dict[str, Spec] = {
         "Gradient accumulation",
         'Accumulate this many microbatches per optimizer update. Increases effective batch size without retaining every microbatch graph.',
         lambda: F.IntEditor(1, 256)),
+    "train.nonfinite_patience": _spec(
+        "Invalid-update limit", "Skip invalid ordinary optimizer updates on all ranks; stop after this many consecutive failures. Gradient release stops immediately.",
+        lambda: F.IntEditor(1, 100)),
+    "train.activation_offload": _spec(
+        "Offload checkpoint inputs", "Bounded CPU activation storage. Requires gradient checkpointing and torch.compile disabled.",
+        lambda: F.BoolEditor("Offload checkpoint inputs"), inline_label=True),
+    "train.activation_offload_budget_mb": _spec(
+        "Activation CPU budget (MiB/rank)", "Maximum live offloaded checkpoint inputs per GPU process. Two GPUs can use twice this RAM. Excess inputs stay on GPU.",
+        lambda: F.IntEditor(1, 262144)),
+    "train.activation_offload_pin_memory": _spec(
+        "Pin activation memory", "Optional pinned RAM for transfers. Disabled by default to reduce pressure on host memory.",
+        lambda: F.BoolEditor("Pin activation memory"), inline_label=True),
+    "train.activation_offload_prefetch": _spec(
+        "Prefetch checkpoint inputs", "One-block transfer lookahead; requires pinned activation memory. Uses extra transient GPU memory.",
+        lambda: F.BoolEditor("Prefetch checkpoint inputs"), inline_label=True),
+    "dataset.cache_validation": _spec(
+        "Latent cache validation", "warn: permit unverified legacy caches but reject known VAE mismatches. strict: require verified provenance and local VAE. off: bypass validation.",
+        lambda: F.ChoiceEditor(["warn", "strict", "off"])),
     "train.gradient_checkpointing": _spec(
         "Gradient checkpointing",
         'Recompute transformer activations during backward to reduce activation memory.',
@@ -636,13 +657,19 @@ SPEC: dict[str, Spec] = {
         lambda: F.BoolEditor("Decompose both LoKr factors"), inline_label=True),
 
     # ------------------------------------------------------------------ quant
+    "quant.backend": _spec(
+        "Transformer quantization backend",
+        "ConvRot is experimental MOSS BF16 LyCORIS LoCon training with a frozen INT8 base, "
+        "rotation group 256 and INT8 forward matmul. Requires the convrot extra. "
+        "Text encoder and optimizer settings remain independent.",
+        lambda: F.ChoiceEditor(["SDNQ", "ConvRot INT8 (experimental)"], ["sdnq", "convrot"])),
     "quant.mode": _spec(
-        "SDNQ mode",
+        "Quantization mode",
         'frozen trains adapters on quantized base weights; training updates quantized master weights for full finetuning.',
         lambda: F.ChoiceEditor(["none", "frozen", "training"])),
     "quant.weights_dtype": _spec(
         "Weight dtype",
-        'SDNQ weight storage dtype. Benchmark quality and throughput on your data.',
+        'SDNQ weight storage dtype (ConvRot always uses INT8). Also the inherited text encoder dtype.',
         lambda: F.ChoiceEditor(["int8", "uint8", "fp8", "int7", "int6", "int5", "int4"])),
     "quant.use_quantized_matmul": _spec(
         "Quantized matmul",
@@ -684,7 +711,7 @@ SPEC: dict[str, Spec] = {
 LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
     ("Dataset", [
         ("Dataset Source", [
-            "dataset.path", "dataset.source", "dataset.num_repeats", "dataset.subsets",
+            "dataset.path", "dataset.source", "dataset.cache_validation", "dataset.num_repeats", "dataset.subsets",
         ]),
         ("Resolution", [
             "dataset.resolution", "dataset.resolutions", "dataset.tier_collapse",
@@ -733,6 +760,7 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
             "train.vae_encode_chunk",
         ]),
         ("Memory / Precision", [
+            "train.activation_offload", "train.activation_offload_budget_mb", "train.activation_offload_pin_memory", "train.activation_offload_prefetch", "train.nonfinite_patience",
             "train.dtype", "train.compressed_adaln_dtype", "train.gradient_checkpointing", "train.pack_resolutions", "train.checkpoint_blocks", "train.attention_backend", "train.max_text_tokens", "train.cache_text_embeddings", "train.text_cache_batch_size", "train.caption_variations", "train.caption_cache_path", "train.offload_text_encoder",
         ]),
         ("torch.compile", [
@@ -741,7 +769,7 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
         ]),
         ("Checkpoints", [
             "train.save_every_epochs", "train.save_every_steps", "train.keep_last_n",
-            "train.save_native", "train.save_optimizer_state", "train.resume_from",
+            "train.save_native", "train.moss_qkv_format", "train.save_optimizer_state", "train.resume_from",
             "train.skip_final_save",
         ]),
         ("Logging", [
@@ -804,8 +832,8 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
             'self_flow.enabled', 'self_flow.ema_dtype', 'self_flow.ema_device',
             'self_flow.adaln_fp32', 'self_flow.stochastic_rounding', 'self_flow.decay', 'self_flow.weight',
         ]),
-        ("SDNQ Quantization", [
-            "quant.mode", "quant.weights_dtype", "quant.use_quantized_matmul",
+        ("Quantization", [
+            "quant.backend", "quant.mode", "quant.weights_dtype", "quant.use_quantized_matmul",
             "quant.skip_policy", "quant.extra_skip",
             "quant.quantize_text_encoder", "quant.text_encoder_weights_dtype", "quant.use_stochastic_rounding",
             "quant.group_size", "quant.dynamic_loss_threshold",
@@ -829,6 +857,6 @@ TRANSFORMED_GROUP_TITLES.update({
     "Curriculum", "Texture Crops", "Oversize Cascade",
     "High-Frequency Token Loss", "Adapter", "Text Encoder Adapter", "LoKr",
     "Concept Preservation", "Full Finetuning",
-    "SDNQ Quantization", "Learning Rate Schedule", "REX / ReREX",
+    "Quantization", "Learning Rate Schedule", "REX / ReREX",
     "Per-Component Learning Rates", "Optimizer State",
 })

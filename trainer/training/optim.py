@@ -112,7 +112,19 @@ def enable_gradient_release(optimizer, num_processes=1):
     from optimi import prepare_for_gradient_release
     params = list(dict.fromkeys(p for g in optimizer.param_groups for p in g["params"]))
     holder = torch.nn.ParameterList(params)
-    prepare_for_gradient_release(holder, optimizer)
+    from .step_safety import guard_released_gradient
+    if any(p.requires_grad and getattr(p, '_post_accumulate_grad_hooks', None) for p in params):
+        raise ValueError("Model already has post_accumulate_grad_hooks")
+    guards = [p.register_post_accumulate_grad_hook(guard_released_gradient)
+              for p in params if p.requires_grad]
+    try:
+        # Only our guards precede the optimizer hooks. Preserve Optimi's cleanup API.
+        prepare_for_gradient_release(holder, optimizer, ignore_existing_hooks=True)
+    except BaseException:
+        for handle in guards:
+            handle.remove()
+        raise
+    holder._gradient_release_hooks.extend(guards)
     return holder
 
 

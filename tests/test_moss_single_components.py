@@ -156,6 +156,9 @@ def test_original_vae_cache_cli_stays_in_trainer(tmp_path, monkeypatch):
     import os
     import sys
 
+    # Other GPU tests may already have imported Comfy kernels; check this CLI call.
+    modules_before = set(sys.modules)
+
     from diffusers import AutoencoderKLFlux2
     from PIL import Image
 
@@ -210,7 +213,7 @@ def test_original_vae_cache_cli_stays_in_trainer(tmp_path, monkeypatch):
         keys = f.keys()
         assert all(f.get_tensor(k).isfinite().all() for k in keys)
     assert not any(
-        k == "comfy" or k.startswith(("comfy.", "comfy_kitchen")) for k in sys.modules
+        k == "comfy" or k.startswith(("comfy.", "comfy_kitchen")) for k in set(sys.modules) - modules_before
     )
 
 

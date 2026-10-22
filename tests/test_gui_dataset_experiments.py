@@ -41,6 +41,28 @@ def test_subset_rows_disable_single_source_and_restore_it(gui):
     assert gui.collect()["dataset.path"] == "/images"
 
 
+def test_convrot_controls_and_roundtrip(gui, tmp_path):
+    import toml
+    from trainer.training.config import load_config
+
+    gui._apply(bridge.defaults() | {
+        "dataset.path": "/images", "train.model_family": "moss_image",
+        "adapter.kind": "lycoris_lora", "adapter.lycoris_algo": "locon",
+        "adapter.dtype": "bfloat16",
+        "quant.mode": "frozen", "quant.backend": "convrot",
+    })
+    flat = gui.collect()
+    assert flat["quant.backend"] == "convrot"
+    for key in ("weights_dtype", "use_quantized_matmul", "group_size", "dynamic_loss_threshold"):
+        assert not gui.editors[f"quant.{key}"].widget.isEnabled()
+    path = tmp_path / "convrot.toml"
+    path.write_text(toml.dumps(bridge.nest(bridge.prune_defaults(flat))))
+    assert load_config(path).quant.backend == "convrot"
+    gui.editors["quant.quantize_text_encoder"].set(True)
+    gui._apply(gui.collect())
+    assert gui.editors["quant.text_encoder_weights_dtype"].widget.isEnabled()
+
+
 def test_experimental_visibility_preserves_active_settings(gui):
     assert not gui.tab_bar.isTabVisible(gui.experimental_tab)
     gui.experimental_chk.setChecked(True)
@@ -99,3 +121,43 @@ def test_remove_subset_by_row_number(gui):
     subsets.del_btn.click()
     assert subsets.get() == []
     assert gui.editors["dataset.path"].widget.isEnabled()
+
+
+def test_offload_cache_policy_roundtrip_and_gates(gui, tmp_path):
+    import toml
+    from trainer.training.config import load_config
+    gui._apply(bridge.defaults() | {
+        'dataset.path': '/images', 'dataset.cache_validation': 'strict',
+        'train.activation_offload': True, 'train.activation_offload_budget_mb': 2048,
+        'train.activation_offload_pin_memory': True, 'train.activation_offload_prefetch': True,
+        'train.nonfinite_patience': 5, 'train.compile': None,
+    })
+    flat = gui.collect()
+    assert gui.editors['train.activation_offload_prefetch'].widget.isEnabled()
+    path = tmp_path / 'offload.toml'
+    path.write_text(toml.dumps(bridge.nest(bridge.prune_defaults(flat))))
+    cfg = load_config(path)
+    assert cfg.train.activation_offload
+    assert cfg.train.activation_offload_budget_mb == 2048
+    assert cfg.train.activation_offload_prefetch
+    assert cfg.train.nonfinite_patience == 5
+    assert cfg.dataset.cache_validation == 'strict'
+    jobs = gui._cache_jobs(flat)
+    argv = jobs[0].launch.argv
+    assert argv[argv.index('--cache-validation') + 1] == 'strict'
+
+
+@pytest.mark.parametrize('layout', ['auto', 'fused', 'separated'])
+def test_moss_qkv_export_gui_roundtrip(gui,tmp_path,layout):
+    from trainer.training.config import load_config
+    gui._apply(bridge.defaults() | {
+        'dataset.path':'/images','train.model_family':'moss_image',
+        'adapter.kind':'lycoris_lora','adapter.lycoris_algo':'locon',
+        'train.moss_qkv_format':layout,
+    })
+    assert gui.editors['train.moss_qkv_format'].widget.isEnabled()
+    path=tmp_path/'fused.toml'
+    bridge.write_toml(path,gui.collect())
+    assert load_config(path).train.moss_qkv_format==layout
+    gui._apply(gui.collect() | {'adapter.lycoris_algo':'lokr','train.moss_qkv_format':'separated'})
+    assert not gui.editors['train.moss_qkv_format'].widget.isEnabled()

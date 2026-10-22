@@ -10,7 +10,9 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.checkpoint import checkpoint
+from trainer.training.activation_offload import (
+    checkpoint_with_offload, configure_activation_offload,
+)
 
 
 @dataclass
@@ -182,7 +184,16 @@ class Flux3(nn.Module):
         compile_mode=None,
         compile_dynamic=True,
         attention_backend="sdpa",
+        activation_offload=False,
+        activation_offload_budget_mb=1024,
+        activation_offload_pin_memory=False,
+        activation_offload_prefetch=False,
     ):
+        configure_activation_offload(
+            self, enabled=activation_offload, budget_mb=activation_offload_budget_mb,
+            pin_memory=activation_offload_pin_memory, prefetch=activation_offload_prefetch,
+            gradient_checkpointing=gradient_checkpointing, compile_mode=compile_mode,
+        )
         if attention_backend not in ("sdpa", "torch_varlen"):
             raise ValueError(
                 'Flux3 requires attention_backend="sdpa" or "torch_varlen"'
@@ -218,14 +229,13 @@ class Flux3(nn.Module):
     def run_blocks(self, blocks, x, mod, angles, packed=None):
         for block in blocks:
             if self.checkpointing and self.training and torch.is_grad_enabled():
-                x = checkpoint(
-                    self.block_forward,
+                x = checkpoint_with_offload(
+                    self, self.block_forward,
                     block,
                     x,
                     mod,
                     angles,
                     packed,
-                    use_reentrant=False,
                 )
             else:
                 x = self.block_forward(block, x, mod, angles, packed)
