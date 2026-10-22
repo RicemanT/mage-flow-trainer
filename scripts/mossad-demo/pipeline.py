@@ -9,7 +9,8 @@ A deadline watchdog sends save-and-quit in time for the last checkpoint to uploa
 Progress: /root/work/pipeline/status.txt. Logs: /root/work/logs/<run>.log.
 
 Later stages' lengths can change while it runs: /root/work/pipeline/plan.json, e.g. {"768": {"epochs": 45}}
-(keys epochs / save_every / sample_every), read when a stage starts or resumes. Restarting the pipeline is safe:
+(keys epochs / save_every / sample_every / lr, e.g. {"1024": {"lr": "2e-5"}}), read when a stage starts or resumes.
+An lr override keeps the run's name (the name says which LR test it continues). Restarting the pipeline is safe:
 it first waits for a trainer that is already running (the deadline and switch watchdogs still apply to it).
 """
 import json
@@ -73,7 +74,7 @@ def run_name(res, letter):
 
 
 def stage_plan():
-    """STAGES with /root/work/pipeline/plan.json's overrides applied."""
+    """STAGES with /root/work/pipeline/plan.json's overrides applied, plus each stage's peak LR (None: the run's)."""
     try:
         overrides = json.loads((STATE / "plan.json").read_text())
     except (OSError, ValueError):
@@ -81,8 +82,12 @@ def stage_plan():
     plan = []
     for res, epochs, save_every, sample_every in STAGES:
         o = overrides.get(res, {}) if isinstance(overrides, dict) else {}
+        lr = o.get("lr")
+        if lr is not None:
+            lr = str(lr)
+            float(lr)   # a typo fails here, before a trainer starts
         plan.append((res, int(o.get("epochs", epochs)), int(o.get("save_every", save_every)),
-                     int(o.get("sample_every", sample_every))))
+                     int(o.get("sample_every", sample_every)), lr))
     return plan
 
 
@@ -138,9 +143,10 @@ def pick_batches():
 
 
 def make_config(res, letter, batch, epochs, save_every, sample_every, transformer_path=None, resume_from=None,
-                fresh=False):
+                fresh=False, lr=None):
     text = TEMPLATE.read_text(encoding="utf-8")
-    lrname, lr = LRS[letter]
+    lrname, run_lr = LRS[letter]
+    lr = lr or run_lr
 
     def sub(pattern, new, count=1):
         nonlocal text
@@ -158,7 +164,7 @@ def make_config(res, letter, batch, epochs, save_every, sample_every, transforme
     sub(r"^save_every_epochs = 5$", f"save_every_epochs = {save_every}")
     sub(r"^every_n_epochs = 5$", f"every_n_epochs = {sample_every}")
     sub(r"^at_start = true$", f"at_start = {'true' if fresh else 'false'}")
-    sub(r"^wandb_tags = .*$", f'wandb_tags = ["moss-pilot", "{res}", "{lrname}"]')
+    sub(r"^wandb_tags = .*$", f'wandb_tags = ["moss-pilot", "{res}", "{lrname}", "peak-{lr}"]')
     sub(r"^(end_lr|lr|max_val) = 5e-5$", rf"\1 = {lr}", count=3)
     extra = ""
     if transformer_path:
@@ -232,7 +238,7 @@ def chain(letter, batches):
     """The full stage plan for one LR. Returns 'done', 'switch', 'deadline' or 'failed'."""
     previous = None
     for index in range(len(STAGES)):
-        res, epochs, save_every, sample_every = stage_plan()[index]
+        res, epochs, save_every, sample_every, lr = stage_plan()[index]
         run = run_name(res, letter)
         final = OUT / run / f"{run}.safetensors"
         if final.exists():
@@ -243,8 +249,8 @@ def chain(letter, batches):
             continue
         state = latest_state(run)
         config = make_config(res, letter, batches[res], epochs, save_every, sample_every,
-                             transformer_path=previous, resume_from=state, fresh=state is None and res == "512")
-        status(f"stage {res} ({LRS[letter][1]}): {run}, batch {batches[res]}"
+                             transformer_path=previous, resume_from=state, fresh=state is None and res == "512", lr=lr)
+        status(f"stage {res} ({lr or LRS[letter][1]}): {run}, batch {batches[res]}"
                + (f", resuming {state.name}" if state else "")
                + (f", from {previous.name}" if previous else ""))
         code, reason = train(config, run, stop_when=lambda: "switching to " + winner() if winner() != letter else None)
