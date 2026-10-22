@@ -491,6 +491,8 @@ def load_config(path: str | Path) -> Config:
                 cfg.caption.protected_tags = load_protected_tags(protected_file)
             sections[f.name] = cfg
         else:
+            if f.name == "flow" and data.get("timestep_sample_method") == "moss":
+                data = {"shift": 1.0, **data}
             if f.name == "flow" and data.get("flux_shift") and "shift" not in data:
                 data = {**data, "shift": None}
             sections[f.name] = _build(_SECTIONS[f.name], data, f.name)

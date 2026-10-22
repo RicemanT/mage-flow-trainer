@@ -479,10 +479,31 @@ SPEC: dict[str, Spec] = {
         lambda: F.FloatEditor(0.001, 0.5, 0.05, 3)),
     "flow.timestep_sample_method": _spec(
         "Timestep sampling",
-        "logit_normal concentrates t near 0.5; uniform is flat.\n\nNo per-timestep loss weighting "
-        "exists here on purpose: for rectified flow uniform weighting is already correct, and the "
-        "timestep DISTRIBUTION is the lever. Weighting as well would double-count.",
-        lambda: F.ChoiceEditor(["logit_normal", "uniform"])),
+        "logit_normal samples a sigmoid of normal noise; uniform is flat. "
+        "moss uses Kohaku's static MOSS recipe: a truncated/rescaled logit-normal distribution "
+        "on a discrete grid including pure noise. It locks shared sigmoid scale and shift at 1 "
+        "and disables resolution-aware shift. These change sampling frequency, not loss weights.",
+        lambda: F.ChoiceEditor(["logit_normal", "uniform", "moss"])),
+    "flow.moss_mu": _spec(
+        "MOSS normal mean", "Mean before the inverted sigmoid; default -1.09. More negative biases toward noise.",
+        lambda: F.FloatEditor(-20, 20, 0.01, 3)),
+    "flow.moss_std": _spec(
+        "MOSS normal std", "Distribution width for MOSS sampling, independent of sigmoid_scale. Default 0.95.",
+        lambda: F.FloatEditor(0.001, 20, 0.01, 3)),
+    "flow.moss_cutoff": _spec(
+        "MOSS cutoff", "Condition the base distribution below this cutoff, then rescale onto the full grid "
+        "up to t=1. This is NOT the maximum sampled timestep. 1 disables truncation; default 0.95.",
+        lambda: F.FloatEditor(0.001, 1, 0.01, 3)),
+    "flow.moss_uniform_mix": _spec(
+        "MOSS uniform mixture", "Fraction mixed with a uniform grid distribution. Default 0.01 (1%).",
+        lambda: F.FloatEditor(0, 1, 0.01, 4)),
+    "flow.moss_p_full": _spec(
+        "MOSS extra pure-noise mass", "Extra probability assigned to t=1. Default 0; the final grid bin "
+        "already has nonzero probability without an extra atom.",
+        lambda: F.FloatEditor(0, 1, 0.01, 4)),
+    "flow.moss_steps": _spec(
+        "MOSS grid size", "Number of discrete timesteps j/N, j=1..N. Default 1000. Not inference steps.",
+        lambda: F.IntEditor(2, 100000)),
     "flow.sigmoid_scale": _spec(
         "Sigmoid scale",
         "Widens or narrows the logit-normal draw. Measured p10/p90: 0.5 -> 0.34/0.65, "
@@ -805,6 +826,8 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
         ("Flow Matching", [
             "flow.timestep_sample_method", "flow.sigmoid_scale", "flow.shift",
             "flow.flux_shift", "flow.use_ot", "flow.phase_mapping",
+            "flow.moss_mu", "flow.moss_std", "flow.moss_cutoff",
+            "flow.moss_uniform_mix", "flow.moss_p_full", "flow.moss_steps",
             "flow.dual_timestep", "flow.dual_timestep_mask_ratio",
         ]),
         ("High-Frequency Token Loss", [

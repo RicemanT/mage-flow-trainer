@@ -63,6 +63,60 @@ def test_convrot_controls_and_roundtrip(gui, tmp_path):
     assert gui.editors["quant.text_encoder_weights_dtype"].widget.isEnabled()
 
 
+def test_moss_sampler_locks_shared_controls_and_roundtrips(gui, tmp_path):
+    from trainer.training.config import load_config
+    gui._apply(bridge.defaults() | {"dataset.path": "/images", "flow.sigmoid_scale": 3,
+                                   "flow.shift": None, "flow.flux_shift": True})
+    gui.editors["flow.timestep_sample_method"].set("moss")
+    gui._on_edit()
+    flat = gui.collect()
+    assert flat["flow.shift"] == flat["flow.sigmoid_scale"] == 1
+    assert not flat["flow.flux_shift"]
+    for name in ("shift", "sigmoid_scale", "flux_shift"):
+        assert not gui.editors[f"flow.{name}"].widget.isEnabled()
+    assert gui.editors["flow.moss_std"].widget.isEnabled()
+    path = tmp_path / "moss.toml"
+    bridge.write_toml(path, flat)
+    cfg = load_config(path)
+    assert cfg.flow.timestep_sample_method == "moss"
+    assert cfg.flow.shift == 1 and cfg.flow.moss_std == .95
+    gui._apply(bridge.defaults() | bridge.flatten(bridge.read_toml(path)))
+    assert gui.collect() == flat
+    gui.editors["flow.timestep_sample_method"].set("logit_normal")
+    gui._on_edit()
+    assert gui.editors["flow.shift"].widget.isEnabled()
+    assert gui.editors["flow.sigmoid_scale"].widget.isEnabled()
+    assert not gui.editors["flow.moss_std"].widget.isEnabled()
+
+
+def test_loading_moss_in_gui_locks_old_shared_values(gui):
+    gui._apply(bridge.defaults() | {"dataset.path": "/images", "flow.timestep_sample_method": "moss",
+                                   "flow.sigmoid_scale": 3, "flow.shift": 3})
+    assert gui.collect()["flow.shift"] == gui.collect()["flow.sigmoid_scale"] == 1
+
+
+def test_live_timestep_plot_reacts_and_renders(gui):
+    import torch
+    gui._apply(bridge.defaults() | {"dataset.path": "/images", "flow.shift": 1})
+    original = gui.timestep_plot.canvas.result
+    rng_state = torch.random.get_rng_state().clone()
+    gui.editors["flow.sigmoid_scale"].set(3)
+    gui._on_edit()
+    wider = gui.timestep_plot.canvas.result
+    assert wider.high_noise > original.high_noise
+    assert wider.median == original.median == .5
+    gui.editors["flow.shift"].set(3)
+    gui._on_edit()
+    assert gui.timestep_plot.canvas.result.median == .75
+    assert torch.equal(rng_state, torch.random.get_rng_state())
+    gui.timestep_plot.resize(420, 360)
+    assert not gui.timestep_plot.grab().isNull()
+    gui.editors["flow.shift"].set(0)
+    gui._on_edit()
+    assert gui.timestep_plot.canvas.result is None
+    assert gui.timestep_plot.canvas.error
+
+
 def test_experimental_visibility_preserves_active_settings(gui):
     assert not gui.tab_bar.isTabVisible(gui.experimental_tab)
     gui.experimental_chk.setChecked(True)

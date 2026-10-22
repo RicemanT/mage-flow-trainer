@@ -345,10 +345,10 @@ The local reference review identified these independent follow-ups:
 4. **FP32 residual streams.** Keep residual additions in FP32 while linear/attention
    compute remains BF16. This may preserve small additions but costs activation
    bandwidth/memory; improved LoRA quality has not been established.
-5. **MOSS-specific timestep curricula.** Discrete grids, uniform mixtures and
-   staged distributions are experimental alternatives to our valid continuous
-   logit-normal sampler. Long-run stage boundaries should not be copied unchanged
-   into short adapter runs.
+5. **MOSS-specific timestep curricula.** The static Kohaku recipe is now available
+   as `flow.timestep_sample_method="moss"`, with a GUI probability preview and locked
+   shared shift/scale. Staged schedules remain unimplemented; long-run stage
+   boundaries should not be copied unchanged into short adapter runs.
 6. **LoRA+ factor-specific LR.** Give the up/zero-initialized factor its own LR
    multiplier while preserving component/scheduler ratios. Ratio 1 reproduces
    ordinary behavior; improved convergence or mixing still needs measurement.

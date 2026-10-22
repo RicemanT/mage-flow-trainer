@@ -39,8 +39,14 @@ def apply_flux_shift(t: torch.Tensor, latent_h: int, latent_w: int) -> torch.Ten
 
 @dataclass
 class FlowConfig:
-    timestep_sample_method: str = "logit_normal"  # "logit_normal" | "uniform"
+    timestep_sample_method: str = "logit_normal"  # "logit_normal" | "uniform" | "moss"
     sigmoid_scale: float = 1.0
+    moss_mu: float = -1.09
+    moss_std: float = 0.95
+    moss_cutoff: float = 0.95
+    moss_uniform_mix: float = 0.01
+    moss_p_full: float = 0.0
+    moss_steps: int = 1000
     shift: float | None = 6.0       # static shift; mutually exclusive with flux_shift
     flux_shift: bool = False         # resolution-dependent shift
     use_ot: bool = False             # cosine optimal-transport noise pairing
@@ -73,8 +79,27 @@ class FlowConfig:
                 f"trains on nothing. Remove the `shift` key entirely for no shift, or use 1.0 for "
                 f"the identity map."
             )
-        if self.timestep_sample_method not in ("logit_normal", "uniform"):
+        if self.timestep_sample_method not in ("logit_normal", "uniform", "moss"):
             raise ValueError(f"unknown timestep_sample_method: {self.timestep_sample_method}")
+        if self.timestep_sample_method == "moss":
+            if self.sigmoid_scale != 1.0 or self.shift != 1.0 or self.flux_shift:
+                raise ValueError("Kohaku MOSS sampling locks sigmoid_scale=1, shift=1 and "
+                                 "flux_shift=false; use moss_std for its distribution width")
+        if not math.isfinite(self.moss_mu):
+            raise ValueError("flow.moss_mu must be finite")
+        if not math.isfinite(self.moss_std) or self.moss_std <= 0:
+            raise ValueError("flow.moss_std must be finite and positive")
+        if not 0 < self.moss_cutoff <= 1:
+            raise ValueError("flow.moss_cutoff must be in (0, 1]")
+        for name in ("moss_uniform_mix", "moss_p_full"):
+            if not 0 <= getattr(self, name) <= 1:
+                raise ValueError(f"flow.{name} must be in [0, 1]")
+        if type(self.moss_steps) is not int or not 2 <= self.moss_steps <= 100000:
+            raise ValueError("flow.moss_steps must be an integer in [2, 100000]")
+        if self.timestep_sample_method == "moss":
+            from .moss_timesteps import probability_table
+            probability_table(self.moss_mu, self.moss_std, self.moss_cutoff,
+                              self.moss_uniform_mix, self.moss_p_full, self.moss_steps)
         # `sigmoid_scale` is the width of the logistic squash applied to a normal draw. There is no
         # sigmoid in the uniform path, so the value would be read and discarded -- rejected rather
         # than ignored, because a config that says "widen the timestep distribution" and silently
@@ -126,6 +151,9 @@ def _draw(cfg: FlowConfig, n: int, latent_h: int, latent_w: int, device, generat
         t = torch.sigmoid(t * cfg.sigmoid_scale)
     else:
         t = torch.rand((n,), device=draw_device, generator=generator).to(device)
+        if cfg.timestep_sample_method == "moss":
+            from .moss_timesteps import inverse_cdf
+            t = inverse_cdf(t, cfg)
 
     # Shift is applied *before* any range mapping, matching the reference implementation. The
     # other order is not equivalent -- shift is nonlinear, so shifting a rescaled t bends the
@@ -178,6 +206,9 @@ def sample_timesteps(
         if cfg.timestep_sample_method == "logit_normal":
             base = torch.sigmoid(torch.distributions.normal.Normal(0, 1).icdf(base)
                                  * cfg.sigmoid_scale)
+        elif cfg.timestep_sample_method == "moss":
+            from .moss_timesteps import inverse_cdf
+            base = inverse_cdf(base, cfg)
         if cfg.shift is not None:
             base = apply_static_shift(base, cfg.shift)
         elif cfg.flux_shift:

@@ -223,6 +223,40 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m trainer.training.train configs/my-run
 
 This preset is derived from `bisque-mageflow-lora-SDQN-AdamW.toml`, with batch size 1, accumulation 1, and a 10-step limit. For a real run, increase/remove `max_steps` and enable checkpoint/final saves. The original local preset uses larger batches and is not the configuration measured below.
 
+## Timestep sampling preview
+
+**Method → Flow Matching** includes a live probability plot. Adjust the sampler,
+sigmoid scale, or shift to see the distribution, median, and fraction of draws at
+`t >= 0.9`. Hover a bar for its probability. `t=0` is clean and `t=1` is pure noise;
+this plot shows sampling frequency, not loss weighting. Resolution-aware shift
+has a preview-only latent grid selector. Curriculum range mapping is not shown.
+
+Choose `moss` for the **Kohaku static MOSS recipe**, independently implemented
+from its probability law. The GUI sets and locks `sigmoid_scale=1`, `shift=1`,
+and `flux_shift=false`. TOML loading rejects conflicting explicit values.
+Existing configurations retain their sampler; this is an opt-in experiment.
+
+```toml
+[flow]
+timestep_sample_method = "moss"
+shift = 1.0
+sigmoid_scale = 1.0
+flux_shift = false
+moss_mu = -1.09
+moss_std = 0.95
+moss_cutoff = 0.95
+moss_uniform_mix = 0.01
+moss_p_full = 0.0
+moss_steps = 1000
+```
+
+The MOSS fields above are defaults. `moss_std` controls this sampler's width.
+Its cutoff truncates the underlying inverted logit-normal variable **before
+rescaling onto the full grid**, so returned timesteps still reach `1.0`.
+The uniform mixture adds coverage across the grid; `moss_p_full` optionally adds
+extra mass at pure noise. The final grid bin already has nonzero probability
+when `moss_p_full=0`. This implements the static recipe, not a staged schedule.
+
 ## Dual-timestep noising (experimental)
 
 Enable **Dual-timestep noising** in the GUI's flow settings, or add:

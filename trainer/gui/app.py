@@ -24,6 +24,7 @@ from PySide6 import QtCore, QtWidgets
 from . import bridge
 from ..training.optimizer_specs import OPTIMIZERS, optimizer_defaults, supports
 from .metrics import LiveMetricsWidget
+from .timestep_plot import TimestepDistributionWidget
 from .process import (Job, ProcessRunner, audit_launch, cache_launch, concat_launch,
                       train_launch, training_env)
 from .schema import LAYOUT, SPEC
@@ -92,6 +93,10 @@ _RULES = {
         'ema_dtype', 'ema_device', 'adaln_fp32', 'stochastic_rounding', 'decay', 'weight')},
     # Measured: under `uniform`, scale 0.5/1.0/2.0 give byte-identical distributions.
     "flow.sigmoid_scale": lambda c: c.get("flow.timestep_sample_method") == "logit_normal",
+    "flow.shift": lambda c: c.get("flow.timestep_sample_method") != "moss",
+    "flow.flux_shift": lambda c: c.get("flow.timestep_sample_method") != "moss",
+    **{f"flow.moss_{option}": (lambda c: c.get("flow.timestep_sample_method") == "moss")
+       for option in ("mu", "std", "cutoff", "uniform_mix", "p_full", "steps")},
     "flow.dual_timestep_mask_ratio": lambda c: bool(c.get("flow.dual_timestep")),
     "flow.hf_exponent": lambda c: float(c.get("flow.hf_scale") or 0) > 0,
     **{f"rti.{option}": (lambda c: bool(c.get("rti.enabled"))) for option in (
@@ -313,16 +318,27 @@ class TrainingGUI(QtWidgets.QWidget):
 
         # Balance by control count rather than by group count, so one 10-key group does not sit
         # beside three 2-key ones.
-        total = sum(len(keys) for _, keys in groups)
-        running, target = 0, total / 2
-        for title, keys in groups:
-            gb, lay = group_box(title, QtWidgets.QVBoxLayout)
+        def field_form():
             form = QtWidgets.QFormLayout()
             form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight
                                    | QtCore.Qt.AlignmentFlag.AlignVCenter)
             form.setFieldGrowthPolicy(
                 QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            return form
+
+        total = sum(len(keys) for _, keys in groups)
+        running, target = 0, total / 2
+        for title, keys in groups:
+            gb, lay = group_box(title, QtWidgets.QVBoxLayout)
+            form = field_form()
             for key in keys:
+                if title == "Flow Matching" and key == "flow.use_ot":
+                    # Keep the chart beside the controls that change its shape,
+                    # before the remaining flow and recipe settings.
+                    lay.addLayout(form)
+                    self.timestep_plot = TimestepDistributionWidget()
+                    lay.addWidget(self.timestep_plot)
+                    form = field_form()
                 self._add_field(form, key)
             lay.addLayout(form)
             (left if running < target else right).addWidget(gb)
@@ -579,6 +595,7 @@ class TrainingGUI(QtWidgets.QWidget):
             self._applying = False
         self._last_optimizer_kind = flat.get("optimizer.kind")
         self._last_adapter_selection = (flat.get("adapter.kind"), flat.get("adapter.lycoris_algo"))
+        self._lock_moss_sampling()
         self._refresh()
 
     def collect(self) -> dict:
@@ -681,8 +698,23 @@ class TrainingGUI(QtWidgets.QWidget):
 
     # ---------------------------------------------------------------- reactivity
 
+    def _lock_moss_sampling(self):
+        if self.editors["flow.timestep_sample_method"].get() != "moss":
+            return
+        locked = {"flow.sigmoid_scale": 1.0, "flow.shift": 1.0, "flow.flux_shift": False}
+        changed = any(self.editors[key].get() != value for key, value in locked.items())
+        self._applying = True
+        try:
+            for key, value in locked.items():
+                self.editors[key].set(value)
+        finally:
+            self._applying = False
+        if changed:
+            self.log("Kohaku MOSS sampling: locked sigmoid_scale=1, shift=1, flux_shift=false")
+
     def _on_edit(self):
         if not self._applying:
+            self._lock_moss_sampling()
             kind = self.editors["optimizer.kind"].get()
             if kind != getattr(self, "_last_optimizer_kind", kind) and kind in OPTIMIZERS:
                 self._applying = True
@@ -706,6 +738,7 @@ class TrainingGUI(QtWidgets.QWidget):
 
     def _refresh(self):
         flat = self.collect()
+        self.timestep_plot.set_config(flat)
         has_subsets = self.editors["dataset.subsets"].table.rowCount() > 0
         for key in ("dataset.path", "dataset.num_repeats"):
             self.editors[key].set_enabled(not has_subsets)
