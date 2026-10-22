@@ -143,6 +143,10 @@ Boxes are `[y_min, x_min, y_max, x_max]` normalized to 0-1000 of the original im
   per comic or collage panel, captioned with what happens in it, so the tune learns panel composition (base
   MOSS-Image only has the summary's `canvas: "multi_panel"`). `layout_panels = false` trains on MOSS's
   vocabulary only. Prompt it as `{"label":"panel","caption":"...","bbox":[...]}` next to the other items.
+  `layout_panels_as_objects = true` gives panels as `object` items captioned "panel: ..." instead (a caption
+  whose first words already say "panel" is kept as is). That is what a box node that only draws objects, such
+  as ComfyUI's default, sends, and base MOSS already follows object boxes captioned "panel". The layout files
+  keep their `panel` items either way.
 - **Short item captions.** Layout items carry a full one-sentence `caption` and a `short` one of a few words,
   the way people prompt a box ("Reimu", "Marisa holding a spoon on a stool"). `layout_short_captions` (default
   0) is the share of layout samples whose items use the short caption, so both prompting styles are learned;

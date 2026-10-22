@@ -4,7 +4,7 @@ import random
 from pathlib import Path
 
 from trainer.data.caption import CaptionConfig, build_caption, caption_identity
-from trainer.data.moss_captions import Annotations, annotations_for, compile_layout, crop_transform
+from trainer.data.moss_captions import Annotations, annotations_for, compile_layout, crop_transform, panel_object_caption
 
 LAYOUT = {
     "summary": {"meta": ["anime illustration"], "canvas": "single", "caption": "A girl under a title."},
@@ -133,6 +133,16 @@ def test_panel_items(tmp_path):
     items = json.loads(build_caption("1girl", None, off, random.Random(0), notes))["items"]
     assert [i["label"] for i in items] == ["character", "character"]
     assert "layout_panels" not in caption_identity(CaptionConfig()) and caption_identity(off)["layout_panels"] is False
+    # Panels as objects: what ComfyUI's default box node sends. A caption that already says "panel" stays as is.
+    objects = CaptionConfig(caption_mode="layout", layout_panels_as_objects=True)
+    items = json.loads(build_caption("1girl", None, objects, random.Random(0), notes))["items"]
+    assert [i["label"] for i in items] == ["object", "character", "object", "character"]
+    assert items[0] == {"label": "object", "caption": "Left panel: Miku waves.", "bbox": [-256, -256, 256, 0]}
+    assert "layout_panels_as_objects" not in caption_identity(CaptionConfig())
+    assert caption_identity(objects)["layout_panels_as_objects"] is True
+    assert panel_object_caption("The two girls hug.") == "panel: The two girls hug."
+    assert panel_object_caption("panel: the two girls hugging") == "panel: the two girls hugging"
+    assert panel_object_caption("") == "panel"
     # A layout of panels only has no layout variant without panels: it falls back instead of an empty caption.
     write_annotations(tmp_path, stem="only", layout={"summary": {"caption": "x"}, "items": comic["items"][::2]})
     only = Annotations(tmp_path / "only", (1000, 1000), (512, 512))

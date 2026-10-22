@@ -17,7 +17,8 @@ without the file a variant needs falls back to its NL caption, then to its tags.
 
 Besides MOSS's `character` / `object` / `text` items, MageTrail layouts carry `panel` items (a comic or collage
 panel with a caption of what happens in it), an extension the fine-tune learns; `layout_panels = false` leaves
-them out. Character details (a ribbon, a hat, a worn weapon) are `object` items with `part_of` (the index of their
+them out, and `layout_panels_as_objects` turns them into `object` items captioned "panel: ...", the way a box
+node that only draws objects sends a panel. Character details (a ribbon, a hat, a worn weapon) are `object` items with `part_of` (the index of their
 character): the model sees plain objects; `layout_parts = false` leaves them out.
 """
 from __future__ import annotations
@@ -65,12 +66,13 @@ class Annotations:
         return " ".join(text.split()) if isinstance(text, str) and text.strip() else None
 
     def layout(self, summary_prefix: str = "", rng: random.Random | None = None, item_dropout: float = 0.0,
-               panels: bool = True, short_share: float = 0.0, parts: bool = True) -> str | None:
+               panels: bool = True, short_share: float = 0.0, parts: bool = True,
+               panels_as_objects: bool = False) -> str | None:
         self._load()
         if not isinstance(self._layout, dict) or not all(self.source_size) or not all(self.bucket):
             return None
         return compile_layout(self._layout, self.source_size, self.bucket, summary_prefix, rng, item_dropout, panels,
-                              short_share, parts)
+                              short_share, parts, panels_as_objects)
 
     def available(self, panels: bool = True, parts: bool = True) -> set[str]:
         out = {kind for kind in ("short", "medium", "long") if self.caption(kind)}
@@ -107,13 +109,23 @@ def drop_items(items: list, rng: random.Random, item_dropout: float) -> list:
     return kept or [items[rng.randrange(len(items))]]
 
 
+def panel_object_caption(caption: str) -> str:
+    """A panel's caption as an object box: "panel: <caption>", unless its first words already call it a panel
+    ("panel: the two girls hugging", "Left panel: Miku waves.")."""
+    caption = caption.strip()
+    if "panel" in " ".join(caption.lower().split()[:3]):
+        return caption
+    return f"panel: {caption}" if caption else "panel"
+
+
 def compile_layout(layout: dict, source_size, bucket, summary_prefix: str = "",
                    rng: random.Random | None = None, item_dropout: float = 0.0, panels: bool = True,
-                   short_share: float = 0.0, parts: bool = True) -> str | None:
+                   short_share: float = 0.0, parts: bool = True, panels_as_objects: bool = False) -> str | None:
     """MOSS's model-facing layout prompt for one training crop, or None when no item survives the crop.
     With `item_dropout` (and an `rng`), a random share of the surviving items is left out (`drop_items`). With
     `short_share`, that share of samples gives every item that has one its `short` caption ("Marisa holding a
-    spoon") instead of the full sentence, the way people prompt boxes."""
+    spoon") instead of the full sentence, the way people prompt boxes. With `panels_as_objects`, panels become
+    `object` items captioned "panel: ..." (`panel_object_caption`)."""
     use_short = rng is not None and short_share > 0 and rng.random() < short_share
     width, height = source_size
     bucket_w, bucket_h = bucket
@@ -139,7 +151,10 @@ def compile_layout(layout: dict, source_size, bucket, summary_prefix: str = "",
         if bbox[0] >= bbox[2] or bbox[1] >= bbox[3]:
             continue
         caption = item.get("short") if use_short and item.get("short") else item.get("caption", "")
-        out = {"label": item["label"], "caption": caption}
+        label = item["label"]
+        if label == "panel" and panels_as_objects:
+            label, caption = "object", panel_object_caption(caption)
+        out = {"label": label, "caption": caption}
         if item.get("text"):
             out["text"] = item["text"]
         out["bbox"] = bbox

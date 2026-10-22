@@ -89,6 +89,9 @@ class CaptionConfig:
     layout_item_dropout: float = 0.0
     # MageTrail layouts carry `panel` items (comic / collage panels) beyond MOSS's vocabulary; false = leave out.
     layout_panels: bool = True
+    # Panels as `object` items captioned "panel: ..." -- what a box node that only draws objects (ComfyUI's
+    # default) sends at inference -- instead of the `panel` label. Needs layout_panels.
+    layout_panels_as_objects: bool = False
     # Share of layout samples whose items use their `short` caption (a few words, how people prompt a box) instead
     # of the full sentence, so both prompting styles are learned. Items without one keep the full caption.
     layout_short_captions: float = 0.0
@@ -180,6 +183,8 @@ def caption_identity(cfg: CaptionConfig) -> dict:
         data.pop("layout_item_dropout", None)   # off: keys as before the option existed
     if cfg.layout_panels:
         data.pop("layout_panels", None)          # default: keys as before the option existed
+    if not cfg.layout_panels_as_objects:
+        data.pop("layout_panels_as_objects", None)
     if not cfg.layout_short_captions:
         data.pop("layout_short_captions", None)
     if cfg.layout_parts:
@@ -454,7 +459,7 @@ def _build_annotation(tags_text: str, variant: str, cfg: CaptionConfig, annotati
             # The template's text around {caption}, applied to the layout summary's caption.
             prefix = cfg.annotation_attribution_template.split("{caption}")[0].format(attribution=prefix_parts[0])
         return annotations.layout(prefix, rng, cfg.layout_item_dropout, cfg.layout_panels,
-                                  cfg.layout_short_captions, cfg.layout_parts) or ""
+                                  cfg.layout_short_captions, cfg.layout_parts, cfg.layout_panels_as_objects) or ""
     text = annotations.caption(variant) or ""
     if prefix_parts and text:
         return cfg.annotation_attribution_template.format(attribution=prefix_parts[0], caption=text)

@@ -504,6 +504,11 @@ SPEC: dict[str, Spec] = {
         "MageTrail layouts box each comic / collage panel with a caption of what happens in it, beyond MOSS's "
         "character / object / text items. Off = train on MOSS's vocabulary only.",
         lambda: F.BoolEditor("Keep panel items"), inline_label=True),
+    "dataset.caption.layout_panels_as_objects": _spec(
+        "Panels as object boxes",
+        "Give panels to the model as object boxes captioned \"panel: ...\", which is what a box node that only "
+        "draws objects (ComfyUI's default) sends, instead of the separate panel label.",
+        lambda: F.BoolEditor("Panels as objects"), inline_label=True),
     "dataset.caption.attribution_dedupe_on_combine": _spec(
         "Dedupe attribution on tags+NL",
         "tags_nl / nl_tags join both fields, and datasets carry `Drawn by X` in both so it "
@@ -938,6 +943,7 @@ LAYOUT: list[tuple[str, list[tuple[str, list[str]]]]] = [
             "dataset.caption.annotation_attribution_template",
             "dataset.caption.layout_item_dropout",
             "dataset.caption.layout_panels",
+            "dataset.caption.layout_panels_as_objects",
             "dataset.caption.layout_short_captions",
             "dataset.caption.layout_parts",
         ]),
