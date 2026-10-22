@@ -23,10 +23,10 @@ The local reference review identified these independent follow-ups:
    values and noise seeds; report each sigma separately. This distinguishes
    learning from changes in timestep difficulty. Lower loss still does not prove
    better visual quality.
-2. **Atomic training checkpoints and isolated RNG streams.** Our Accelerate resume
-   already restores optimizer/scheduler/RNG state. Atomic checkpoint publication,
-   dedicated sigma/noise generators and uninterrupted-versus-resumed tests would
-   strengthen crash recovery and experimental control.
+2. **Atomic training checkpoint publication.** Dedicated per-rank timestep,
+   noise and mask generators are now implemented and saved separately, with exact
+   next-draw resume tests on CPU DDP and CUDA. Atomic publication of the complete
+   model/optimizer checkpoint remains a separate crash-recovery improvement.
 3. **A resolved adapter/group manifest.** List trained tensor names, counts, LR and
    decay explicitly. This would have made the 262-versus-263 target difference in
    our comparison obvious. Excluding norm/scalar parameters from weight decay is

@@ -117,13 +117,15 @@ class FlowConfig:
                     min_gate=self.hf_high_noise_min_weight, power=self.hf_high_noise_power)
 
 
-def _draw(cfg: FlowConfig, n: int, latent_h: int, latent_w: int, device) -> torch.Tensor:
+def _draw(cfg: FlowConfig, n: int, latent_h: int, latent_w: int, device, generator=None) -> torch.Tensor:
     """One unrestricted draw of t in [0,1], distribution and shift applied."""
+    # Keep default draws on CPU as before; an explicit generator owns its device.
+    draw_device = generator.device if generator is not None else 'cpu'
     if cfg.timestep_sample_method == "logit_normal":
-        t = torch.distributions.normal.Normal(0, 1).sample((n,)).to(device)
+        t = torch.randn((n,), device=draw_device, generator=generator).to(device)
         t = torch.sigmoid(t * cfg.sigmoid_scale)
     else:
-        t = torch.distributions.uniform.Uniform(0, 1).sample((n,)).to(device)
+        t = torch.rand((n,), device=draw_device, generator=generator).to(device)
 
     # Shift is applied *before* any range mapping, matching the reference implementation. The
     # other order is not equivalent -- shift is nonlinear, so shifting a rescaled t bends the
@@ -183,13 +185,13 @@ def sample_timesteps(
         return (base * (hi - lo) + lo).to(dtype)
 
     if t_range is None or cfg.phase_mapping == "rescale":
-        return (_draw(cfg, batch_size, latent_h, latent_w, device) * (hi - lo) + lo).to(dtype)
+        return (_draw(cfg, batch_size, latent_h, latent_w, device, generator) * (hi - lo) + lo).to(dtype)
 
     # Truncate by rejection. Draws are scalars, so rejected ones cost nothing measurable; the
     # bound exists so a range with negligible probability fails loudly instead of hanging.
     out = torch.empty(0, device=device)
     for _ in range(_TRUNCATE_MAX_ROUNDS):
-        c = _draw(cfg, batch_size * 4, latent_h, latent_w, device)
+        c = _draw(cfg, batch_size * 4, latent_h, latent_w, device, generator)
         out = torch.cat([out, c[(c >= lo) & (c <= hi)]])
         if out.numel() >= batch_size:
             return out[:batch_size].to(dtype)
@@ -234,6 +236,7 @@ def prepare_flow_batch(
     quantile: float | None = None,
     stats: dict | None = None,
     t_range: tuple[float, float] | None = None,
+    timestep_generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """latents (B,C,T,H,W) -> (noisy_latents, timesteps, target).
 
@@ -249,7 +252,8 @@ def prepare_flow_batch(
 
     t = sample_timesteps(
         cfg, b, h, w, device=latents.device, dtype=torch.float32,
-        generator=generator, quantile=quantile, t_range=t_range,
+        generator=timestep_generator if timestep_generator is not None else generator,
+        quantile=quantile, t_range=t_range,
     )
 
     noise = torch.randn(latents.shape, device=latents.device, dtype=latents.dtype, generator=generator)
@@ -285,17 +289,22 @@ def prepare_training_flow_batch(latents, cfg, **kwargs):
     Mage-Flow uses one image token per latent pixel. Both times use the same
     distribution, shift and curriculum range. OT pairing happens only once.
     """
+    mask_generator = kwargs.pop('mask_generator', kwargs.get('generator'))
     noisy, t, target = prepare_flow_batch(latents, cfg, **kwargs)
     if not cfg.dual_timestep:
         return noisy, t, target, None, None
     b, _, _, h, w = latents.shape
     if latents.shape[2] != 1:
         raise ValueError("Dual-timestep training currently supports images only")
+    time_generator = kwargs.get('timestep_generator')
+    if time_generator is None:
+        time_generator = kwargs.get('generator')
     second = sample_timesteps(cfg, b, h, w, latents.device,
-                              generator=kwargs.get('generator'), quantile=kwargs.get('quantile'),
+                              generator=time_generator,
+                              quantile=kwargs.get('quantile'),
                               t_range=kwargs.get('t_range'))
     mask = torch.rand((b, h, w), device=latents.device,
-                      generator=kwargs.get('generator')) < cfg.dual_timestep_mask_ratio
+                      generator=mask_generator) < cfg.dual_timestep_mask_ratio
     # Reuse already paired noise via velocity; do not independently re-noise tokens.
     noisy = latents.float() + effective_timesteps(t, second, mask) * target
     return noisy, t, target, second, mask

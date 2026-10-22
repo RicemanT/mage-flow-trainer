@@ -12,6 +12,8 @@ from trainer.data.dataset import DatasetConfig
 @pytest.mark.parametrize('packed', [False, True])
 def test_moss_training_passes_unrounded_timesteps(monkeypatch, packed):
     trainer = train.Trainer.__new__(train.Trainer)
+    from trainer.training.flow_rng import FlowRNG
+    trainer.flow_rng = FlowRNG(42, 0, 1, 'cpu')
     trainer.cfg = Config(dataset=DatasetConfig(path="/test"))
     trainer.cfg.train.model_family = 'moss_image'
     trainer.cfg.train.pack_resolutions = packed

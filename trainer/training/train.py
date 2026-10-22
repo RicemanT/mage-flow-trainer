@@ -166,18 +166,13 @@ class Trainer:
         if (cfg.quant.mode == "training" or cfg.quant.backend == "convrot") and self.accelerator.num_processes > 1:
             from .distributed import configure_quantized_ddp
             self.accelerator.ddp_handler = configure_quantized_ddp()
-        # `device_specific=True` adds the process index to the seed, so ranks do not start from an
-        # identical torch RNG state. Without it every rank calls `torch.manual_seed(seed)` with the
-        # same value, and since the timestep draw is shape (B,) regardless of image shape, rank 0
-        # and rank 1 sample the SAME timestep wherever their streams are in step -- always at step
-        # 1, and thereafter whenever the two ranks happen to draw the same texture canvas (~22% of
-        # batches with the default preset list, since a matching shape consumes the stream
-        # identically and keeps them synchronised).
-        #
-        # This is the same defect the caption RNG was fixed for -- every DDP rank forking from one
-        # seed -- missed in the noise/timestep path. Single-GPU behaviour is unchanged: with one
-        # process the index is 0, so the seed is identical to before and existing runs reproduce.
+        # Rank-local global RNG still serves dropout and other model operations.
+        # DDP synchronizes initial model/adapter weights. Flow draws use separate
+        # streams below; stochastic optimizer updates use shared isolated RNG.
         set_seed(cfg.train.seed, device_specific=True)
+        from .flow_rng import FlowRNG
+        self.flow_rng = FlowRNG(cfg.train.seed, self.accelerator.process_index,
+                                self.accelerator.num_processes, self.accelerator.device)
 
         self.out_dir = Path(cfg.train.output_dir) / cfg.train.run_name
         if self.accelerator.is_main_process:
@@ -678,7 +673,8 @@ class Trainer:
 
         stats: dict = {}
         noisy, timesteps, target, second_t, token_mask = prepare_training_flow_batch(
-            latents, self.cfg.flow, stats=stats, t_range=self.phase.t_range if self.phase else None
+            latents, self.cfg.flow, stats=stats, t_range=self.phase.t_range if self.phase else None,
+            **self.flow_rng.kwargs(),
         )
         self.last_stats = stats
         encoder_hidden_states = self._encode(batch["captions"])
@@ -733,9 +729,12 @@ class Trainer:
         context = self._encode(batch['captions'])
         noises, times, masks, noisy, teacher_images, clean_times = [], [], [], [], [], []
         for latent in latents:
-            noise = torch.randn_like(latent)
-            t = sample_timesteps(self.cfg.flow, 2, *latent.shape[-2:], latent.device)
-            ids = (torch.rand(latent.shape[-2:], device=latent.device) < self.cfg.flow.dual_timestep_mask_ratio).long()
+            noise = torch.randn(latent.shape, device=latent.device, dtype=latent.dtype,
+                                generator=self.flow_rng.noise)
+            t = sample_timesteps(self.cfg.flow, 2, *latent.shape[-2:], latent.device,
+                                 generator=self.flow_rng.timesteps)
+            ids = (torch.rand(latent.shape[-2:], device=latent.device,
+                              generator=self.flow_rng.mask) < self.cfg.flow.dual_timestep_mask_ratio).long()
             per_token_t = t[ids][None, None, None]
             noises.append(noise)
             times.append(t)
@@ -767,7 +766,7 @@ class Trainer:
         device = self.accelerator.device
         latents = ([self._encode_pixels(x.to(device,self.dtype)) for x in batch["pixels"]]
                    if "pixels" in batch else [x.to(device,torch.float32) for x in batch["latents"]])
-        prepared = [prepare_training_flow_batch(x,self.cfg.flow) for x in latents]
+        prepared = [prepare_training_flow_batch(x,self.cfg.flow, **self.flow_rng.kwargs()) for x in latents]
         noisy,times,targets,second_times,token_masks = zip(*prepared)
         ordinary_count = len(latents)
         dedicated = self.cfg.perceptual.enabled and self.cfg.perceptual.dedicated_low_noise
@@ -1343,7 +1342,8 @@ class Trainer:
             (self.out_dir / f"{stem}-state" / "state.json").write_text(
                 json.dumps({"global_step": self.global_step, "tensors": n,
                             "successful_updates": self.successful_updates, "skipped_updates": self.skipped_updates,
-                            "source_checkpoint": self.source_checkpoint}, indent=2)
+                            "source_checkpoint": self.source_checkpoint,
+                            "flow_rng_version": self.flow_rng.version}, indent=2)
             )
         _emit(self, f"saved {written} ({n} tensors)")
         self._prune_checkpoints()
@@ -1425,6 +1425,10 @@ class Trainer:
         # SDNQTensor is a wrapper without ordinary tensor storage. Native
         # torch serialization preserves its quantized payload and metadata.
         self.accelerator.save_state(str(dest), safe_serialization=self.cfg.quant.mode != 'training')
+        # Accelerate custom-object files are main-rank saves; these streams differ
+        # per rank, so each process writes its own state explicitly.
+        self.flow_rng.save(dest)
+        self.accelerator.wait_for_everyone()
 
     def _resume(self, path: str) -> None:
         p = Path(path)
@@ -1452,12 +1456,13 @@ class Trainer:
                 f"{p} has no saved optimizer state (expected {acc_dir}). It was written with "
                 f"save_full_state disabled, so it can be used for inference but not resumed."
             )
+        saved_state = json.loads(state_file.read_text())
+        self.flow_rng.load(acc_dir, required='flow_rng_version' in saved_state)
         from sdnq.training import SDNQTensor
         from sdnq.dequantizer import SDNQDequantizer
         with torch.serialization.safe_globals([SDNQTensor, SDNQDequantizer]):
             self.accelerator.load_state(str(acc_dir))
 
-        saved_state = json.loads(state_file.read_text())
         self.global_step = saved_state["global_step"]
         self.skipped_updates = saved_state.get("skipped_updates", 0)
         self.successful_updates = saved_state.get("successful_updates", self.global_step - self.skipped_updates)

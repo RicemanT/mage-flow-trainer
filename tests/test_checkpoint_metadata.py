@@ -117,6 +117,8 @@ class CheckpointMetadataTests(unittest.TestCase):
                 (root / 'state.json').write_text(json.dumps(
                     {'global_step': 20, 'source_checkpoint': original}))
                 trainer = Trainer.__new__(Trainer)
+                from trainer.training.flow_rng import FlowRNG
+                trainer.flow_rng = FlowRNG(42, 0, 1, 'cpu')
                 trainer.source_checkpoint = {'name': 'current-init.safetensors', 'md5': 'init-hash'}
                 trainer.accelerator = SimpleNamespace(load_state=lambda path: None,
                                                       print=lambda *args: None)

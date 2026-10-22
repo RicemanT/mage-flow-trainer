@@ -268,6 +268,29 @@ process keeps its loaded export code.
 
 Enable `train.save_optimizer_state=true` to save resumable Accelerate state. Resume skips already-consumed microbatches within the current epoch. `train.resume_from` accepts the exported safetensors path or its adjacent `-state` directory. Inference exports alone cannot resume optimizer state. Keep the dataset and batching configuration consistent when resuming.
 
+### Random streams and DDP
+
+`train.seed` initializes separate timestep, noise and dual-timestep-mask streams
+for each rank. Model initialization, caption encoding, dataloader startup and
+optimizer stochastic rounding do not consume these streams. Timesteps use a CPU
+generator; noise and masks use a generator on the training device. Dataset
+shuffling retains a common seed before sharding, and optimizer stochastic rounding
+retains shared update randomness so replicas stay synchronized.
+
+Resumable checkpoints save `flow_rng_rank<N>.safetensors` for every rank alongside
+Accelerate state. Resume restores each rank's own streams and requires the same
+world size and device type. Missing files in new checkpoints fail explicitly.
+Legacy checkpoints without these files remain loadable, with a warning that new
+flow streams cannot reproduce the old run's random draws. Inference exports do
+not contain RNG state.
+
+This changes exact draws relative to older trainer versions at the same seed; it
+does not change the configured timestep distribution or claim stronger learning.
+The `generator` argument to timestep sampling is now honored, including truncated
+sampling. Separate streams make controlled experiments less sensitive to unrelated
+random operations; they do not promise bitwise reproducibility across hardware or
+PyTorch versions.
+
 ## Verification
 
 See [validation results](mageflow-validation.md) and [attention measurements](mageflow-attention-benchmark.json). These include real pretrained-model smoke steps and small-model numerical tests; they do not establish long-run image quality. For resolution capacity, see the [single- and dual-GPU VRAM benchmark](readme-vram-benchmark.md).
