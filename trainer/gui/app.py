@@ -28,6 +28,7 @@ from ..training.optimizer_specs import OPTIMIZERS, optimizer_defaults, supports
 from .metrics import LiveMetricsWidget
 from .timestep_plot import TimestepDistributionWidget
 from .run_queue import RunQueueWidget
+from .preferences import Preferences
 from .process import (Job, ProcessRunner, audit_launch, cache_launch, concat_launch,
                       train_launch, training_env)
 from .schema import LAYOUT, SPEC
@@ -195,7 +196,7 @@ _RULES["component_lr.adaln"] = lambda c: c.get("adapter.kind") == "none"
 
 
 class TrainingGUI(QtWidgets.QWidget):
-    def __init__(self):
+    def __init__(self, *, preferences=None, config_dir=None):
         super().__init__()
         self.setWindowTitle("Mage-Flow Trainer")
         self.setMinimumSize(1100, 820)
@@ -217,9 +218,16 @@ class TrainingGUI(QtWidgets.QWidget):
         # Configs opened from outside `configs/`, kept for the session so the preset
         # dropdown can list them alongside the built-ins.
         self._external: list[Path] = []
+        self.preferences = preferences if preferences is not None else Preferences()
+        saved_dir = self.preferences.values.get("config_dir")
+        self.config_dir = Path(saved_dir).expanduser() if isinstance(saved_dir, str) and saved_dir else CONFIG_DIR
+        self.sections = {}
+        self._launch_configs = []
 
         self._setup_ui()
         self._on_gpu_selection()
+        if config_dir is not None:
+            self._set_config_dir(config_dir)
         self._load_presets()
 
     # ---------------------------------------------------------------- build
@@ -248,6 +256,7 @@ class TrainingGUI(QtWidgets.QWidget):
         nav_lay.addWidget(make_btn("Save", self._save))
         nav_lay.addWidget(make_btn("Save As", self._save_as))
         nav_lay.addWidget(make_btn("Reload", self._reload))
+        nav_lay.addWidget(make_btn("Preferences", self._preferences_dialog))
         main.addWidget(nav, 0)
 
         self.experimental_chk = QtWidgets.QCheckBox("Enable advanced experimental features")
@@ -315,6 +324,12 @@ class TrainingGUI(QtWidgets.QWidget):
         page = QtWidgets.QWidget()
         outer = QtWidgets.QVBoxLayout(page)
         outer.setContentsMargins(0, 0, 0, 0)
+        sections = []
+        actions = QtWidgets.QHBoxLayout()
+        actions.addStretch()
+        actions.addWidget(make_btn("Expand all", lambda: [s.setExpanded(True) for s in sections]))
+        actions.addWidget(make_btn("Collapse all", lambda: [s.setExpanded(False) for s in sections]))
+        outer.addLayout(actions)
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
@@ -342,7 +357,12 @@ class TrainingGUI(QtWidgets.QWidget):
         total = sum(len(keys) for _, keys in groups)
         running, target = 0, total / 2
         for title, keys in groups:
-            gb, lay = group_box(title, QtWidgets.QVBoxLayout)
+            gb, lay = group_box(title, QtWidgets.QVBoxLayout, collapsible=True)
+            sections.append(gb)
+            self.sections[title] = gb
+            collapsed = self.preferences.values.get("collapsed_sections", [])
+            gb.setExpanded(title not in collapsed if isinstance(collapsed, list) else True)
+            gb.expandedChanged.connect(lambda expanded, title=title: self._remember_section(title, expanded))
             form = field_form()
             for key in keys:
                 if title == "Flow Matching" and key == "flow.use_ot":
@@ -376,6 +396,21 @@ class TrainingGUI(QtWidgets.QWidget):
             label.setToolTip(spec.tooltip)
             form.addRow(label)
             form.addRow(editor.widget)
+            self.rows[key] = (label, editor.widget)
+        elif key == "train.run_name":
+            row = QtWidgets.QWidget()
+            layout = QtWidgets.QHBoxLayout(row)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(editor.widget, 1)
+            self.autosave_chk = QtWidgets.QCheckBox("Autosave")
+            self.autosave_chk.setChecked(self.preferences.values.get("autosave", True) is not False)
+            self.autosave_chk.setToolTip(
+                "Save the current settings when starting training. When off, Save and Save As "
+                "still work; Start uses a temporary TOML without changing your saved configs.")
+            self.autosave_chk.toggled.connect(lambda on: self._save_preference("autosave", on))
+            layout.addWidget(self.autosave_chk)
+            label = QtWidgets.QLabel(spec.label)
+            form.addRow(label, row)
             self.rows[key] = (label, editor.widget)
         elif spec.inline_label:
             form.addRow(editor.widget)
@@ -526,45 +561,96 @@ class TrainingGUI(QtWidgets.QWidget):
 
     # ---------------------------------------------------------------- config I/O
 
-    def _load_presets(self, select: Path | None = None):
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    def _save_preference(self, key, value):
+        try:
+            self.preferences.set(key, value)
+        except OSError as exc:
+            self.log(f"Could not save GUI preference: {exc}")
+
+    def _remember_section(self, title, expanded):
+        collapsed = [name for name, section in self.sections.items() if not section.header.isChecked()]
+        self._save_preference("collapsed_sections", collapsed)
+
+    def _set_config_dir(self, value):
+        import tempfile
+        target = Path(value).expanduser().resolve() if value else CONFIG_DIR
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryFile(dir=target):
+                pass
+            self.preferences.set("config_dir", str(target) if value else "")
+        except OSError as exc:
+            QtWidgets.QMessageBox.warning(self, "Cannot use TOML folder", str(exc))
+            return False
+        self.config_dir = target
+        return True
+
+    def _preferences_dialog(self):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("GUI preferences")
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.addWidget(QtWidgets.QLabel("Folder for saved TOMLs (blank uses the repository's configs/):"))
+        row = QtWidgets.QHBoxLayout()
+        folder = QtWidgets.QLineEdit(str(self.config_dir))
+        folder.setMinimumWidth(420)
+        row.addWidget(folder)
+        def browse():
+            selected = QtWidgets.QFileDialog.getExistingDirectory(dialog, "TOML folder", folder.text())
+            if selected:
+                folder.setText(selected)
+        row.addWidget(make_btn("Browse", browse))
+        row.addWidget(make_btn("Use default", folder.clear))
+        layout.addLayout(row)
+        info = QtWidgets.QLabel(f"Remembered for future launches in:\n{self.preferences.path}\nExisting TOMLs are not moved.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Save |
+                                             QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted and self._set_config_dir(folder.text().strip()):
+            if self._current_path is not None:
+                self._external.append(self._current_path)
+            self._load_presets(select=self._current_path, apply=False)
+            self.log(f"TOML save folder: {self.config_dir}")
+
+    def _load_presets(self, select: Path | None = None, *, apply=True):
+        # Stat before populating: deleted/inaccessible files must not break the GUI.
+        candidates = {}
+        for path in [*self.config_dir.glob("*.toml"), *self._external]:
+            try:
+                candidates[path.resolve()] = (path.stat().st_mtime_ns, path)
+            except OSError:
+                continue
         self.preset_combo.blockSignals(True)
         self.preset_combo.clear()
-        known = set()
-        for path in sorted(CONFIG_DIR.glob("*.toml")):
-            self.preset_combo.addItem(path.stem, str(path))
-            known.add(path.resolve())
-        # Configs opened from outside `configs/` stay in the list for the session, marked, so the
-        # dropdown does not silently drop the file you are actually working on the moment the list
-        # is rebuilt (which `Save As` does).
-        for path in self._external:
-            if path.resolve() not in known and path.exists():
-                self.preset_combo.addItem(f"{path.stem}  —  {path.parent}", str(path))
+        for modified, path in sorted(candidates.values(), key=lambda entry: (-entry[0], str(entry[1]).casefold())):
+            label = path.stem if path.parent.resolve() == self.config_dir.resolve() else f"{path.stem}  —  {path.parent}"
+            self.preset_combo.addItem(label, str(path))
+            date = QtCore.QDateTime.fromMSecsSinceEpoch(modified // 1_000_000).toString("yyyy-MM-dd HH:mm:ss")
+            self.preset_combo.setItemData(self.preset_combo.count() - 1, f"{path}\nModified: {date}",
+                                         QtCore.Qt.ItemDataRole.ToolTipRole)
+        index = self.preset_combo.findData(str(select)) if select is not None else 0
+        if not apply and select is None:
+            index = -1  # The form has unsaved values; do not label it as another file.
+        self.preset_combo.setCurrentIndex(index if self.preset_combo.count() else -1)
         self.preset_combo.blockSignals(False)
         # The rebuild happened with signals blocked, so the editable box never got told the
         # selection moved; push the current item's name back into it by hand.
         self.preset_combo.sync_display()
 
-        if select is not None:
-            for i in range(self.preset_combo.count()):
-                if Path(self.preset_combo.itemData(i)).resolve() == select.resolve():
-                    self.preset_combo.setCurrentIndex(i)
-                    self._on_preset_changed(i)
-                    return
+        if not apply:
+            return
         if self.preset_combo.count():
-            self._on_preset_changed(0)
+            self._on_preset_changed(self.preset_combo.currentIndex())
         else:
             self._apply(bridge.defaults())
 
     def _open(self):
-        """Load a TOML from anywhere on disk, not just `configs/`.
-
-        The path is remembered, so pressing Start writes back to the file you opened rather than
-        quietly forking a copy into `configs/` -- which would leave two files with the same name
-        and no way to tell which one a run actually used.
-        """
+        """Load a TOML from anywhere; saves make a copy in the managed folder."""
         start = usable_dialog_start(
-            str(self._current_path) if self._current_path else None, str(CONFIG_DIR))
+            str(self._current_path) if self._current_path else None, str(self.config_dir))
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Open config", start, "TOML configs (*.toml);;All files (*)")
         if not path:
@@ -621,21 +707,21 @@ class TrainingGUI(QtWidgets.QWidget):
         return flat
 
     def _managed_target(self, flat: dict) -> Path:
-        """Where a Save/Start should land: `configs/<run_name>.toml`.
+        """Where a Save/Start should land: `<configured folder>/<run_name>.toml`.
 
         The config file is *named by* `run_name`. Keeping the two in sync by hand is the thing this
         removes -- and they were never independent anyway, since `run_name` already decides the
         checkpoint stem (`out_dir/<run_name>.safetensors`) and the copy of the TOML the trainer
         writes beside it. One name, three places.
         """
-        return CONFIG_DIR / f"{safe_stem(flat.get('train.run_name'))}.toml"
+        return self.config_dir / f"{safe_stem(flat.get('train.run_name'))}.toml"
 
     def _persist(self, flat: dict) -> Path | None:
         """Write `flat` to the managed config and return where it went, or None if cancelled.
 
-        Two rules, both about not destroying a file the user did not mean to touch:
+        Rules about not destroying a file the user did not mean to touch:
 
-        **A config opened from outside `configs/` is never written back to.** Saving copies it in
+        **A config opened from outside the managed folder is never written back to.** Saving copies it in
         instead, and the original is left exactly as it was. Opening someone's config to read its
         settings, tweaking a knob and pressing Start used to rewrite their file in place -- and
         `write_toml` regenerates the TOML, so their comments went with it.
@@ -653,12 +739,12 @@ class TrainingGUI(QtWidgets.QWidget):
         target = self._managed_target(flat)
         src = self._current_path
         src_resolved = src.resolve() if src is not None and src.exists() else None
-        external = src is not None and src.parent.resolve() != CONFIG_DIR.resolve()
+        external = src is not None and src.parent.resolve() != self.config_dir.resolve()
 
         if target.exists() and (src_resolved is None or target.resolve() != src_resolved):
             answer = QtWidgets.QMessageBox.question(
                 self, "Config already exists",
-                f"{target.name} already exists in configs/.\n\n"
+                f"{target.name} already exists in {self.config_dir}.\n\n"
                 f"run_name is {flat.get('train.run_name')!r}, which also names the checkpoints "
                 f"(output/{flat.get('train.run_name')}.safetensors). Two runs sharing it overwrite "
                 f"each other's output as well as this file.\n\nOverwrite it?",
@@ -674,10 +760,31 @@ class TrainingGUI(QtWidgets.QWidget):
         elif src_resolved is not None and target.resolve() != src_resolved:
             self.log(f"run_name changed -- saved as {target.name}, {src.name} left as it was")
 
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        bridge.write_toml(target, flat)
+        try:
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+            bridge.write_toml(target, flat)
+        except OSError as exc:
+            self.log(f"Could not save {target}: {exc}")
+            return None
         self._current_path = target
         return target
+
+    def _training_config(self, flat):
+        if self.autosave_chk.isChecked():
+            path = self._persist(flat)
+            if path is not None:
+                self._load_presets(select=path, apply=False)
+            return path
+        path = self._temporary_config_dir() / f"{safe_stem(flat.get('train.run_name'))}.toml"
+        bridge.write_toml(path, flat)
+        self.log(f"Autosave off: training uses temporary config {path}")
+        return path
+
+    def _temporary_config_dir(self):
+        import tempfile
+        directory = tempfile.TemporaryDirectory(prefix="mageflow-gui-")
+        self._launch_configs.append(directory)
+        return Path(directory.name)
 
     def _save(self):
         path = self._persist(self.collect())
@@ -690,7 +797,7 @@ class TrainingGUI(QtWidgets.QWidget):
         # A real file dialog rather than a name prompt, so a config can be saved beside the dataset
         # or the run it belongs to. Defaults to `configs/`, which is where it used to be forced.
         start = usable_dialog_start(
-            str(self._current_path) if self._current_path else None, str(CONFIG_DIR))
+            str(self._current_path) if self._current_path else None, str(self.config_dir))
         chosen, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Save config as", start, "TOML configs (*.toml)")
         if not chosen:
@@ -698,7 +805,7 @@ class TrainingGUI(QtWidgets.QWidget):
         path = Path(chosen)
         if path.suffix != ".toml":
             path = path.with_suffix(".toml")
-        if path.parent.resolve() != CONFIG_DIR.resolve():
+        if path.parent.resolve() != self.config_dir.resolve():
             self._external.append(path)
         bridge.write_toml(path, self.collect())
         self._current_path = path
@@ -962,10 +1069,9 @@ class TrainingGUI(QtWidgets.QWidget):
         # variant that a later "why did it use that value" cannot account for. It goes through
         # `_persist` for the same reason Save does: starting a run must not rewrite a config that
         # was opened from somewhere else on disk.
-        path = self._persist(flat)
+        path = self._training_config(flat)
         if path is None:
             return
-        self._load_presets(select=path)
 
         # Cache first here too. Same reasoning as the pipeline: an uncached folder is silent, and
         # a warm cache makes this a no-op. A cache step that fails cancels the training, because
@@ -994,13 +1100,7 @@ class TrainingGUI(QtWidgets.QWidget):
     )
 
     def _arm_config(self, flat: dict, suffix: str, init: str, preserve: bool) -> Path | None:
-        """Write one arm's config to `configs/generated/` and return the path.
-
-        Generated configs live in their own directory and are overwritten without asking, which is
-        the opposite of `_persist`'s rule for hand-written ones. Keeping them on disk rather than
-        in a temp file is deliberate: what ran is inspectable afterwards, and the trainer reads a
-        file either way.
-        """
+        """Save a generated arm, or use a temporary TOML when autosave is off."""
         arm = dict(flat)
         base = safe_stem(flat.get("train.run_name")) or "run"
         arm["train.run_name"] = f"{base}-{suffix}"
@@ -1015,7 +1115,7 @@ class TrainingGUI(QtWidgets.QWidget):
             self.log(f"CONFIG ERROR ({suffix} arm): {err}")
             return None
 
-        out_dir = CONFIG_DIR / "generated"
+        out_dir = self.config_dir / "generated" if self.autosave_chk.isChecked() else self._temporary_config_dir()
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"{arm['train.run_name']}.toml"
         bridge.write_toml(path, arm)
@@ -1186,9 +1286,13 @@ class TrainingGUI(QtWidgets.QWidget):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--config-dir", help="Remember this folder for GUI TOML saves")
+    options, _ = parser.parse_known_args(sys.argv[1:])
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
     app.setApplicationName("Mage-Flow Trainer")
-    window = TrainingGUI()
+    window = TrainingGUI(config_dir=options.config_dir)
     window.show()
     sys.exit(app.exec())

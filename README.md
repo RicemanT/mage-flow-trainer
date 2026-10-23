@@ -158,6 +158,21 @@ contents, not timestamps; it does not reinstall packages on every launch or modi
 global Python. `--no-update-check` skips Git checking; `--no-dependency-check`
 skips the package check. Both flags work through the launch scripts.
 
+The config picker lists TOMLs by last modification time, newest first. **Autosave**
+beside the run name defaults to on and saves the form when you press Start; editing
+alone does not save. Turning it off uses a temporary launch TOML without changing
+saved configs. Save and Save As remain available, and the trainer still records its
+run configuration with the training output. Queued runs use their selected TOMLs.
+
+Section headers collapse and expand without changing settings; each settings tab
+also has Expand all / Collapse all. These choices and the autosave toggle are
+remembered in the per-user `mage-flow-trainer/gui.json` preference file (under the
+OS configuration folder, normally `~/.config` on Linux or `%LOCALAPPDATA%` on Windows).
+**Preferences** lets you choose a TOML save folder. Alternatively, set it once at
+launch with `python -m trainer.gui --config-dir "path/to/my configs"`. The picker
+then lists that folder; existing TOMLs are not moved. A missing preference file or
+an unset folder uses the repository's `configs/` directory as before.
+
 ### Queue several training configs
 
 Open **Run Queue**, choose **Add TOMLs**, then drag rows or use **Move up/down** to

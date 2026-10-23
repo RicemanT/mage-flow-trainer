@@ -593,8 +593,40 @@ def inherit_semantic_colors(root):
                     break
             parent = parent.parentWidget()
 
-def group_box(title, layout_type=QtWidgets.QVBoxLayout, role="nested"):
-    gb = QtWidgets.QGroupBox(title)
+class CollapsibleGroupBox(QtWidgets.QGroupBox):
+    """Collapsing hides fields without changing their enabled state or values."""
+    expandedChanged = QtCore.Signal(bool)
+
+    def __init__(self, title):
+        super().__init__()
+        self.setProperty("collapsible", True)
+        outer = QtWidgets.QVBoxLayout(self)
+        self.header = QtWidgets.QToolButton()
+        self.header.setText(title)
+        self.header.setCheckable(True)
+        self.header.setChecked(True)
+        self.header.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.header.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
+                                  QtWidgets.QSizePolicy.Policy.Fixed)
+        self.header.setArrowType(QtCore.Qt.ArrowType.DownArrow)
+        self.header.setAccessibleName(f"Expand or collapse {title}")
+        self.content = QtWidgets.QWidget()
+        outer.addWidget(self.header)
+        outer.addWidget(self.content)
+        self.header.toggled.connect(self._toggle)
+
+    def _toggle(self, expanded):
+        self.content.setVisible(expanded)
+        self.header.setArrowType(QtCore.Qt.ArrowType.DownArrow if expanded
+                                 else QtCore.Qt.ArrowType.RightArrow)
+        self.expandedChanged.emit(expanded)
+
+    def setExpanded(self, expanded):
+        self.header.setChecked(expanded)
+
+
+def group_box(title, layout_type=QtWidgets.QVBoxLayout, role="nested", *, collapsible=False):
+    gb = CollapsibleGroupBox(title) if collapsible else QtWidgets.QGroupBox(title)
     set_role(gb, role)
     if title in RAW_GROUP_TITLES:
         set_semantic_color(gb, "raw")
@@ -602,7 +634,7 @@ def group_box(title, layout_type=QtWidgets.QVBoxLayout, role="nested"):
         set_semantic_color(gb, "transformed")
     else:
         set_semantic_color(gb, "raw")
-    lay = layout_type(gb)
+    lay = layout_type(gb.content if collapsible else gb)
     return gb, lay
 
 def form_row(layout, label_text, widget, tooltip=None):
