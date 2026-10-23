@@ -10,6 +10,13 @@ from safetensors.torch import save_file
 def export_checkpoint(model, dest, stem, cfg, dtype, step, *, runtime=None):
     dest = Path(dest)
     family = getattr(model, "model_family", "mage_flow")
+    qkv_format = getattr(cfg.train, "moss_qkv_format", "auto")
+    if qkv_format == 'auto':
+        plain_adapter = family == 'moss_image' and (cfg.adapter.kind in ('none', 'lora') or (
+            cfg.adapter.kind == 'lycoris_lora' and cfg.adapter.lycoris_algo == 'locon'))
+        qkv_format = 'fused' if family == 'moss_image' and plain_adapter else 'separated'
+    if qkv_format == 'fused' and family != 'moss_image':
+        raise ValueError("Fused QKV export is only supported for MOSS-Image")
     modulation_rank = getattr(getattr(model, "params", None), "modulation_rank", 0)
     metadata = {"step": str(step), "run": cfg.train.run_name, "model": family}
     from .checkpoint_metadata import training_metadata
@@ -83,6 +90,8 @@ def export_checkpoint(model, dest, stem, cfg, dtype, step, *, runtime=None):
         state = {k: v.detach().to("cpu", dtype).contiguous() for k, v in state.items()}
         state.update(keep_fp32)
         config = asdict(model.params)
+        if family == 'moss_image':
+            config['fused_qkv'] = qkv_format == 'fused'
         metadata["model_config"] = json.dumps(config)
         if cfg.train.save_native:
             out = dest / f"{stem}.safetensors"
@@ -92,5 +101,11 @@ def export_checkpoint(model, dest, stem, cfg, dtype, step, *, runtime=None):
             folder.mkdir(parents=True, exist_ok=True)
             (folder / "config.json").write_text(json.dumps(config, indent=2))
             out = folder / "diffusion_pytorch_model.safetensors"
+    if family == 'moss_image':
+        metadata['moss_qkv_format'] = qkv_format
+        if qkv_format == 'fused':
+            from .moss_export import fuse_qkv
+            state, conversion = fuse_qkv(state, adapter=cfg.is_lora)
+            metadata['moss_qkv_conversion'] = json.dumps(conversion)
     save_file(state, str(out), metadata=metadata)
     return len(state)

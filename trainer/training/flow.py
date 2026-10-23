@@ -39,8 +39,14 @@ def apply_flux_shift(t: torch.Tensor, latent_h: int, latent_w: int) -> torch.Ten
 
 @dataclass
 class FlowConfig:
-    timestep_sample_method: str = "logit_normal"  # "logit_normal" | "uniform"
+    timestep_sample_method: str = "logit_normal"  # "logit_normal" | "uniform" | "moss"
     sigmoid_scale: float = 1.0
+    moss_mu: float = -1.09
+    moss_std: float = 0.95
+    moss_cutoff: float = 0.95
+    moss_uniform_mix: float = 0.01
+    moss_p_full: float = 0.0
+    moss_steps: int = 1000
     shift: float | None = 6.0       # static shift; mutually exclusive with flux_shift
     flux_shift: bool = False         # resolution-dependent shift
     use_ot: bool = False             # cosine optimal-transport noise pairing
@@ -73,8 +79,27 @@ class FlowConfig:
                 f"trains on nothing. Remove the `shift` key entirely for no shift, or use 1.0 for "
                 f"the identity map."
             )
-        if self.timestep_sample_method not in ("logit_normal", "uniform"):
+        if self.timestep_sample_method not in ("logit_normal", "uniform", "moss"):
             raise ValueError(f"unknown timestep_sample_method: {self.timestep_sample_method}")
+        if self.timestep_sample_method == "moss":
+            if self.sigmoid_scale != 1.0 or self.shift != 1.0 or self.flux_shift:
+                raise ValueError("Kohaku MOSS sampling locks sigmoid_scale=1, shift=1 and "
+                                 "flux_shift=false; use moss_std for its distribution width")
+        if not math.isfinite(self.moss_mu):
+            raise ValueError("flow.moss_mu must be finite")
+        if not math.isfinite(self.moss_std) or self.moss_std <= 0:
+            raise ValueError("flow.moss_std must be finite and positive")
+        if not 0 < self.moss_cutoff <= 1:
+            raise ValueError("flow.moss_cutoff must be in (0, 1]")
+        for name in ("moss_uniform_mix", "moss_p_full"):
+            if not 0 <= getattr(self, name) <= 1:
+                raise ValueError(f"flow.{name} must be in [0, 1]")
+        if type(self.moss_steps) is not int or not 2 <= self.moss_steps <= 100000:
+            raise ValueError("flow.moss_steps must be an integer in [2, 100000]")
+        if self.timestep_sample_method == "moss":
+            from .moss_timesteps import probability_table
+            probability_table(self.moss_mu, self.moss_std, self.moss_cutoff,
+                              self.moss_uniform_mix, self.moss_p_full, self.moss_steps)
         # `sigmoid_scale` is the width of the logistic squash applied to a normal draw. There is no
         # sigmoid in the uniform path, so the value would be read and discarded -- rejected rather
         # than ignored, because a config that says "widen the timestep distribution" and silently
@@ -117,13 +142,18 @@ class FlowConfig:
                     min_gate=self.hf_high_noise_min_weight, power=self.hf_high_noise_power)
 
 
-def _draw(cfg: FlowConfig, n: int, latent_h: int, latent_w: int, device) -> torch.Tensor:
+def _draw(cfg: FlowConfig, n: int, latent_h: int, latent_w: int, device, generator=None) -> torch.Tensor:
     """One unrestricted draw of t in [0,1], distribution and shift applied."""
+    # Keep default draws on CPU as before; an explicit generator owns its device.
+    draw_device = generator.device if generator is not None else 'cpu'
     if cfg.timestep_sample_method == "logit_normal":
-        t = torch.distributions.normal.Normal(0, 1).sample((n,)).to(device)
+        t = torch.randn((n,), device=draw_device, generator=generator).to(device)
         t = torch.sigmoid(t * cfg.sigmoid_scale)
     else:
-        t = torch.distributions.uniform.Uniform(0, 1).sample((n,)).to(device)
+        t = torch.rand((n,), device=draw_device, generator=generator).to(device)
+        if cfg.timestep_sample_method == "moss":
+            from .moss_timesteps import inverse_cdf
+            t = inverse_cdf(t, cfg)
 
     # Shift is applied *before* any range mapping, matching the reference implementation. The
     # other order is not equivalent -- shift is nonlinear, so shifting a rescaled t bends the
@@ -176,6 +206,9 @@ def sample_timesteps(
         if cfg.timestep_sample_method == "logit_normal":
             base = torch.sigmoid(torch.distributions.normal.Normal(0, 1).icdf(base)
                                  * cfg.sigmoid_scale)
+        elif cfg.timestep_sample_method == "moss":
+            from .moss_timesteps import inverse_cdf
+            base = inverse_cdf(base, cfg)
         if cfg.shift is not None:
             base = apply_static_shift(base, cfg.shift)
         elif cfg.flux_shift:
@@ -183,13 +216,13 @@ def sample_timesteps(
         return (base * (hi - lo) + lo).to(dtype)
 
     if t_range is None or cfg.phase_mapping == "rescale":
-        return (_draw(cfg, batch_size, latent_h, latent_w, device) * (hi - lo) + lo).to(dtype)
+        return (_draw(cfg, batch_size, latent_h, latent_w, device, generator) * (hi - lo) + lo).to(dtype)
 
     # Truncate by rejection. Draws are scalars, so rejected ones cost nothing measurable; the
     # bound exists so a range with negligible probability fails loudly instead of hanging.
     out = torch.empty(0, device=device)
     for _ in range(_TRUNCATE_MAX_ROUNDS):
-        c = _draw(cfg, batch_size * 4, latent_h, latent_w, device)
+        c = _draw(cfg, batch_size * 4, latent_h, latent_w, device, generator)
         out = torch.cat([out, c[(c >= lo) & (c <= hi)]])
         if out.numel() >= batch_size:
             return out[:batch_size].to(dtype)
@@ -234,6 +267,7 @@ def prepare_flow_batch(
     quantile: float | None = None,
     stats: dict | None = None,
     t_range: tuple[float, float] | None = None,
+    timestep_generator: torch.Generator | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """latents (B,C,T,H,W) -> (noisy_latents, timesteps, target).
 
@@ -249,7 +283,8 @@ def prepare_flow_batch(
 
     t = sample_timesteps(
         cfg, b, h, w, device=latents.device, dtype=torch.float32,
-        generator=generator, quantile=quantile, t_range=t_range,
+        generator=timestep_generator if timestep_generator is not None else generator,
+        quantile=quantile, t_range=t_range,
     )
 
     noise = torch.randn(latents.shape, device=latents.device, dtype=latents.dtype, generator=generator)
@@ -285,17 +320,22 @@ def prepare_training_flow_batch(latents, cfg, **kwargs):
     Mage-Flow uses one image token per latent pixel. Both times use the same
     distribution, shift and curriculum range. OT pairing happens only once.
     """
+    mask_generator = kwargs.pop('mask_generator', kwargs.get('generator'))
     noisy, t, target = prepare_flow_batch(latents, cfg, **kwargs)
     if not cfg.dual_timestep:
         return noisy, t, target, None, None
     b, _, _, h, w = latents.shape
     if latents.shape[2] != 1:
         raise ValueError("Dual-timestep training currently supports images only")
+    time_generator = kwargs.get('timestep_generator')
+    if time_generator is None:
+        time_generator = kwargs.get('generator')
     second = sample_timesteps(cfg, b, h, w, latents.device,
-                              generator=kwargs.get('generator'), quantile=kwargs.get('quantile'),
+                              generator=time_generator,
+                              quantile=kwargs.get('quantile'),
                               t_range=kwargs.get('t_range'))
     mask = torch.rand((b, h, w), device=latents.device,
-                      generator=kwargs.get('generator')) < cfg.dual_timestep_mask_ratio
+                      generator=mask_generator) < cfg.dual_timestep_mask_ratio
     # Reuse already paired noise via velocity; do not independently re-noise tokens.
     noisy = latents.float() + effective_timesteps(t, second, mask) * target
     return noisy, t, target, second, mask

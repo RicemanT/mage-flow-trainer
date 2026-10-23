@@ -30,13 +30,14 @@ def _encoder_fingerprint_payload(cfg):
         from ..modeling.loader import ASSETS, text_sources
 
         if getattr(cfg.train, 'model_family', None) == 'moss_image':
-            sources = [Path(getattr(cfg.train, 'text_encoder_path', None) or root / 'text_encoder'),
-                       Path(getattr(cfg.train, 'tokenizer_path', None) or root / 'tokenizer')]
+            from ..modeling.moss_loader import component_config, text_sources as moss_text_sources
+            sources = list(moss_text_sources(root, cfg.train.text_encoder_path, cfg.train.tokenizer_path))
         else:
             sources = list(text_sources(root, getattr(cfg.train, "text_encoder_path", None),
                                         getattr(cfg.train, "tokenizer_path", None)))
         if sources[0].is_file():
-            sources.append(ASSETS / "qwen3vl4b/config.json")
+            sources.append(component_config(root, 'text_encoder') if getattr(cfg.train, "model_family", None) == "moss_image"
+                           else ASSETS / "qwen3vl4b/config.json")
     else:
         # Preserve existing cache keys for the original directory loading method.
         sources = [root / folder for folder in ("text_encoder", "tokenizer")]
@@ -59,6 +60,7 @@ def _encoder_fingerprint_payload(cfg):
     if quant_payload is not None:
         # Selector metadata is not encoder behavior; preserve existing cache keys.
         quant_payload.pop("text_encoder_weights_dtype", None)
+        quant_payload.pop("backend", None)
     payload = dict(
         version=1,
         versions=versions,
@@ -110,6 +112,7 @@ def encoder_fingerprint(cfg, cache_path=None):
             )
         )
         old_quant.pop("text_encoder_weights_dtype", None)
+        old_quant.pop("backend", None)
         # An explicit encoder override must not reuse the transformer's dtype.
         old_quant["weights_dtype"] = payload["quant"]["weights_dtype"]
         compatible.add(digest({**payload, "quant": old_quant}))

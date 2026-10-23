@@ -17,6 +17,8 @@ nothing in the current combination. That is one step ahead of the validators: a 
 from __future__ import annotations
 
 import sys
+import hashlib
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from PySide6 import QtCore, QtWidgets
@@ -26,7 +28,10 @@ from ..training.optimizer_specs import OPTIMIZERS, optimizer_defaults, supports
 from .metrics import LiveMetricsWidget
 from .remote_runner import RemoteCall, RemoteRunner
 from ..remote.client import RemoteClient, RemoteError
-from .process import (Job, ProcessRunner, audit_launch, cache_config_launch, concat_launch,
+from .timestep_plot import TimestepDistributionWidget
+from .run_queue import RunQueueWidget
+from .preferences import Preferences
+from .process import (Job, ProcessRunner, audit_launch, cache_config_launch, cache_launch, concat_launch,
                       train_launch, training_env)
 from .schema import LAYOUT, SPEC
 from .widgets import (
@@ -94,12 +99,21 @@ _RULES = {
         'ema_dtype', 'ema_device', 'adaln_fp32', 'stochastic_rounding', 'decay', 'weight')},
     # Measured: under `uniform`, scale 0.5/1.0/2.0 give byte-identical distributions.
     "flow.sigmoid_scale": lambda c: c.get("flow.timestep_sample_method") == "logit_normal",
+    "flow.shift": lambda c: c.get("flow.timestep_sample_method") != "moss",
+    "flow.flux_shift": lambda c: c.get("flow.timestep_sample_method") != "moss",
+    **{f"flow.moss_{option}": (lambda c: c.get("flow.timestep_sample_method") == "moss")
+       for option in ("mu", "std", "cutoff", "uniform_mix", "p_full", "steps")},
     "flow.dual_timestep_mask_ratio": lambda c: bool(c.get("flow.dual_timestep")),
     "flow.hf_exponent": lambda c: float(c.get("flow.hf_scale") or 0) > 0,
     **{f"rti.{option}": (lambda c: bool(c.get("rti.enabled"))) for option in (
         "dense_prefix_blocks", "dense_suffix_blocks", "size_buckets", "start_keep", "target_keep",
         "identity_steps", "warmup_steps", "anneal_steps", "budget_steps")},
 
+    "train.moss_qkv_format": lambda c: (c.get("train.model_family") in ("auto", "moss_image")
+        and (c.get("adapter.kind") in ("none", "lora") or (c.get("adapter.kind") == "lycoris_lora" and c.get("adapter.lycoris_algo") == "locon"))),
+    "train.activation_offload_budget_mb": lambda c: bool(c.get("train.activation_offload")),
+    "train.activation_offload_pin_memory": lambda c: bool(c.get("train.activation_offload")),
+    "train.activation_offload_prefetch": lambda c: bool(c.get("train.activation_offload")) and bool(c.get("train.activation_offload_pin_memory")),
     "dataset.resolution": lambda c: not c.get("dataset.resolutions"),
     "dataset.tier_collapse": lambda c: bool(c.get("dataset.resolutions")),
     "dataset.min_source_area": lambda c: bool(c.get("dataset.resolutions")),
@@ -165,13 +179,13 @@ _RULES = {
     "train.compile_regional": lambda c: bool(c.get("train.compile")),
 
     "quant.text_encoder_weights_dtype": lambda c: bool(c.get("quant.quantize_text_encoder")),
-    "quant.weights_dtype": lambda c: c.get("quant.mode") != "none" or c.get("quant.quantize_text_encoder"),
-    "quant.use_quantized_matmul": lambda c: c.get("quant.mode") != "none",
+    "quant.weights_dtype": lambda c: (c.get("quant.backend", "sdnq") == "sdnq" and c.get("quant.mode") != "none") or c.get("quant.quantize_text_encoder"),
+    "quant.use_quantized_matmul": lambda c: c.get("quant.backend", "sdnq") == "sdnq" and c.get("quant.mode") != "none",
     "quant.skip_policy": lambda c: c.get("quant.mode") != "none",
     "quant.extra_skip": lambda c: c.get("quant.mode") != "none",
-    "quant.group_size": lambda c: c.get("quant.mode") != "none" or c.get("quant.quantize_text_encoder"),
-    "quant.dynamic_loss_threshold": lambda c: c.get("quant.mode") != "none" or c.get("quant.quantize_text_encoder"),
-    "quant.use_stochastic_rounding": lambda c: c.get("quant.mode") == "training",
+    "quant.group_size": lambda c: (c.get("quant.backend", "sdnq") == "sdnq" and c.get("quant.mode") != "none") or c.get("quant.quantize_text_encoder"),
+    "quant.dynamic_loss_threshold": lambda c: (c.get("quant.backend", "sdnq") == "sdnq" and c.get("quant.mode") != "none") or c.get("quant.quantize_text_encoder"),
+    "quant.use_stochastic_rounding": lambda c: c.get("quant.backend", "sdnq") == "sdnq" and c.get("quant.mode") == "training",
 }
 
 
@@ -202,7 +216,7 @@ _RULES["component_lr.adaln"] = lambda c: c.get("adapter.kind") == "none"
 
 
 class TrainingGUI(QtWidgets.QWidget):
-    def __init__(self):
+    def __init__(self, *, preferences=None, config_dir=None):
         super().__init__()
         self.setWindowTitle("Mage-Flow Trainer")
         self.setMinimumSize(1100, 820)
@@ -214,12 +228,21 @@ class TrainingGUI(QtWidgets.QWidget):
         self._retired = None
         # Launches still to run after the current one -- one per dataset folder (see `_run_each`).
         self._queue: list[Job] = []
+        self._batch_queue_active = False
+        self._queue_cancelled = False
+        self._active_queue_index = None
+        self._queue_generation = 0
         self._on_failure = "stop"
         self._applying = False
         self._current_path: Path | None = None
         # Configs opened from outside `configs/`, kept for the session so the preset
         # dropdown can list them alongside the built-ins.
         self._external: list[Path] = []
+        self.preferences = preferences if preferences is not None else Preferences()
+        saved_dir = self.preferences.values.get("config_dir")
+        self.config_dir = Path(saved_dir).expanduser() if isinstance(saved_dir, str) and saved_dir else CONFIG_DIR
+        self.sections = {}
+        self._launch_configs = []
         # Remote training (`trainer.remote` on a GPU box): None = everything runs locally.
         self.remote: RemoteClient | None = None
         self.remote_status: dict | None = None
@@ -227,6 +250,8 @@ class TrainingGUI(QtWidgets.QWidget):
 
         self._setup_ui()
         self._on_gpu_selection()
+        if config_dir is not None:
+            self._set_config_dir(config_dir)
         self._load_presets()
 
     # ---------------------------------------------------------------- build
@@ -255,7 +280,16 @@ class TrainingGUI(QtWidgets.QWidget):
         nav_lay.addWidget(make_btn("Save", self._save))
         nav_lay.addWidget(make_btn("Save As", self._save_as))
         nav_lay.addWidget(make_btn("Reload", self._reload))
+        nav_lay.addWidget(make_btn("Preferences", self._preferences_dialog))
         main.addWidget(nav, 0)
+
+        self.experimental_chk = QtWidgets.QCheckBox("Enable advanced experimental features")
+        self.experimental_chk.setToolTip(
+            "Show Self-Flow, dual timestep, RTI, decoded perceptual and eye adversarial controls. "
+            "Individual features remain off until enabled. Active features must be disabled "
+            "before hiding their controls."
+        )
+        main.addWidget(self.experimental_chk, 0)
 
         frame = QtWidgets.QFrame()
         set_role(frame, "mainFrame")
@@ -264,9 +298,29 @@ class TrainingGUI(QtWidgets.QWidget):
         self.stack = QtWidgets.QStackedWidget()
         frame_lay.addWidget(self.stack, 1)
 
+        experimental_groups = []
         for title, groups in LAYOUT:
+            regular_groups = []
+            for group_title, keys in groups:
+                if group_title.startswith("Experimental "):
+                    experimental_groups.append((group_title, keys))
+                    continue
+                dual = [k for k in keys if k.startswith("flow.dual_timestep")]
+                if dual:
+                    experimental_groups.append(("Dual timestep noising", dual))
+                regular_groups.append((group_title, [k for k in keys if k not in dual]))
             self.tab_bar.addTab(title)
-            self.stack.addWidget(self._build_page(groups))
+            self.stack.addWidget(self._build_page(regular_groups))
+
+        self.experimental_tab = self.tab_bar.addTab("Experimental")
+        self.stack.addWidget(self._build_page(experimental_groups))
+        self.tab_bar.setTabVisible(self.experimental_tab, False)
+        self.experimental_chk.toggled.connect(self._show_experimental)
+
+        self.run_queue = RunQueueWidget()
+        self.run_queue.startRequested.connect(self._start_queue)
+        self.queue_tab = self.tab_bar.addTab("Run Queue")
+        self.stack.addWidget(self.run_queue)
 
         self.metrics = LiveMetricsWidget()
         self.tab_bar.addTab("Live Metrics")
@@ -283,11 +337,23 @@ class TrainingGUI(QtWidgets.QWidget):
         self.tab_bar.currentChanged.connect(self.stack.setCurrentIndex)
         main.addWidget(frame, 1)
         main.addWidget(self._build_footer(), 0)
+        self.tab_bar.currentChanged.connect(self._refresh)
+
+    def _show_experimental(self, enabled):
+        if not enabled and self.tab_bar.currentIndex() == self.experimental_tab:
+            self.tab_bar.setCurrentIndex(0)
+        self.tab_bar.setTabVisible(self.experimental_tab, enabled)
 
     def _build_page(self, groups):
         page = QtWidgets.QWidget()
         outer = QtWidgets.QVBoxLayout(page)
         outer.setContentsMargins(0, 0, 0, 0)
+        sections = []
+        actions = QtWidgets.QHBoxLayout()
+        actions.addStretch()
+        actions.addWidget(make_btn("Expand all", lambda: [s.setExpanded(True) for s in sections]))
+        actions.addWidget(make_btn("Collapse all", lambda: [s.setExpanded(False) for s in sections]))
+        outer.addLayout(actions)
         scroll = QtWidgets.QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
@@ -304,16 +370,32 @@ class TrainingGUI(QtWidgets.QWidget):
 
         # Balance by control count rather than by group count, so one 10-key group does not sit
         # beside three 2-key ones.
-        total = sum(len(keys) for _, keys in groups)
-        running, target = 0, total / 2
-        for title, keys in groups:
-            gb, lay = group_box(title, QtWidgets.QVBoxLayout)
+        def field_form():
             form = QtWidgets.QFormLayout()
             form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight
                                    | QtCore.Qt.AlignmentFlag.AlignVCenter)
             form.setFieldGrowthPolicy(
                 QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+            return form
+
+        total = sum(len(keys) for _, keys in groups)
+        running, target = 0, total / 2
+        for title, keys in groups:
+            gb, lay = group_box(title, QtWidgets.QVBoxLayout, collapsible=True)
+            sections.append(gb)
+            self.sections[title] = gb
+            collapsed = self.preferences.values.get("collapsed_sections", [])
+            gb.setExpanded(title not in collapsed if isinstance(collapsed, list) else True)
+            gb.expandedChanged.connect(lambda expanded, title=title: self._remember_section(title, expanded))
+            form = field_form()
             for key in keys:
+                if title == "Flow Matching" and key == "flow.use_ot":
+                    # Keep the chart beside the controls that change its shape,
+                    # before the remaining flow and recipe settings.
+                    lay.addLayout(form)
+                    self.timestep_plot = TimestepDistributionWidget()
+                    lay.addWidget(self.timestep_plot)
+                    form = field_form()
                 self._add_field(form, key)
             lay.addLayout(form)
             (left if running < target else right).addWidget(gb)
@@ -333,7 +415,28 @@ class TrainingGUI(QtWidgets.QWidget):
         editor.changed.connect(self._on_edit)
         editor.widget.setToolTip(spec.tooltip)
         self.editors[key] = editor
-        if spec.inline_label:
+        if key == "dataset.subsets":
+            label = QtWidgets.QLabel(spec.label)
+            label.setToolTip(spec.tooltip)
+            form.addRow(label)
+            form.addRow(editor.widget)
+            self.rows[key] = (label, editor.widget)
+        elif key == "train.run_name":
+            row = QtWidgets.QWidget()
+            layout = QtWidgets.QHBoxLayout(row)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(editor.widget, 1)
+            self.autosave_chk = QtWidgets.QCheckBox("Autosave")
+            self.autosave_chk.setChecked(self.preferences.values.get("autosave", True) is not False)
+            self.autosave_chk.setToolTip(
+                "Save the current settings when starting training. When off, Save and Save As "
+                "still work; Start uses a temporary TOML without changing your saved configs.")
+            self.autosave_chk.toggled.connect(lambda on: self._save_preference("autosave", on))
+            layout.addWidget(self.autosave_chk)
+            label = QtWidgets.QLabel(spec.label)
+            form.addRow(label, row)
+            self.rows[key] = (label, editor.widget)
+        elif spec.inline_label:
             form.addRow(editor.widget)
             self.rows[key] = (editor.widget,)
         else:
@@ -515,45 +618,96 @@ class TrainingGUI(QtWidgets.QWidget):
 
     # ---------------------------------------------------------------- config I/O
 
-    def _load_presets(self, select: Path | None = None):
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    def _save_preference(self, key, value):
+        try:
+            self.preferences.set(key, value)
+        except OSError as exc:
+            self.log(f"Could not save GUI preference: {exc}")
+
+    def _remember_section(self, title, expanded):
+        collapsed = [name for name, section in self.sections.items() if not section.header.isChecked()]
+        self._save_preference("collapsed_sections", collapsed)
+
+    def _set_config_dir(self, value):
+        import tempfile
+        target = Path(value).expanduser().resolve() if value else CONFIG_DIR
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryFile(dir=target):
+                pass
+            self.preferences.set("config_dir", str(target) if value else "")
+        except OSError as exc:
+            QtWidgets.QMessageBox.warning(self, "Cannot use TOML folder", str(exc))
+            return False
+        self.config_dir = target
+        return True
+
+    def _preferences_dialog(self):
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("GUI preferences")
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.addWidget(QtWidgets.QLabel("Folder for saved TOMLs (blank uses the repository's configs/):"))
+        row = QtWidgets.QHBoxLayout()
+        folder = QtWidgets.QLineEdit(str(self.config_dir))
+        folder.setMinimumWidth(420)
+        row.addWidget(folder)
+        def browse():
+            selected = QtWidgets.QFileDialog.getExistingDirectory(dialog, "TOML folder", folder.text())
+            if selected:
+                folder.setText(selected)
+        row.addWidget(make_btn("Browse", browse))
+        row.addWidget(make_btn("Use default", folder.clear))
+        layout.addLayout(row)
+        info = QtWidgets.QLabel(f"Remembered for future launches in:\n{self.preferences.path}\nExisting TOMLs are not moved.")
+        info.setWordWrap(True)
+        layout.addWidget(info)
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Save |
+                                             QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted and self._set_config_dir(folder.text().strip()):
+            if self._current_path is not None:
+                self._external.append(self._current_path)
+            self._load_presets(select=self._current_path, apply=False)
+            self.log(f"TOML save folder: {self.config_dir}")
+
+    def _load_presets(self, select: Path | None = None, *, apply=True):
+        # Stat before populating: deleted/inaccessible files must not break the GUI.
+        candidates = {}
+        for path in [*self.config_dir.glob("*.toml"), *self._external]:
+            try:
+                candidates[path.resolve()] = (path.stat().st_mtime_ns, path)
+            except OSError:
+                continue
         self.preset_combo.blockSignals(True)
         self.preset_combo.clear()
-        known = set()
-        for path in sorted(CONFIG_DIR.glob("*.toml")):
-            self.preset_combo.addItem(path.stem, str(path))
-            known.add(path.resolve())
-        # Configs opened from outside `configs/` stay in the list for the session, marked, so the
-        # dropdown does not silently drop the file you are actually working on the moment the list
-        # is rebuilt (which `Save As` does).
-        for path in self._external:
-            if path.resolve() not in known and path.exists():
-                self.preset_combo.addItem(f"{path.stem}  —  {path.parent}", str(path))
+        for modified, path in sorted(candidates.values(), key=lambda entry: (-entry[0], str(entry[1]).casefold())):
+            label = path.stem if path.parent.resolve() == self.config_dir.resolve() else f"{path.stem}  —  {path.parent}"
+            self.preset_combo.addItem(label, str(path))
+            date = QtCore.QDateTime.fromMSecsSinceEpoch(modified // 1_000_000).toString("yyyy-MM-dd HH:mm:ss")
+            self.preset_combo.setItemData(self.preset_combo.count() - 1, f"{path}\nModified: {date}",
+                                         QtCore.Qt.ItemDataRole.ToolTipRole)
+        index = self.preset_combo.findData(str(select)) if select is not None else 0
+        if not apply and select is None:
+            index = -1  # The form has unsaved values; do not label it as another file.
+        self.preset_combo.setCurrentIndex(index if self.preset_combo.count() else -1)
         self.preset_combo.blockSignals(False)
         # The rebuild happened with signals blocked, so the editable box never got told the
         # selection moved; push the current item's name back into it by hand.
         self.preset_combo.sync_display()
 
-        if select is not None:
-            for i in range(self.preset_combo.count()):
-                if Path(self.preset_combo.itemData(i)).resolve() == select.resolve():
-                    self.preset_combo.setCurrentIndex(i)
-                    self._on_preset_changed(i)
-                    return
+        if not apply:
+            return
         if self.preset_combo.count():
-            self._on_preset_changed(0)
+            self._on_preset_changed(self.preset_combo.currentIndex())
         else:
             self._apply(bridge.defaults())
 
     def _open(self):
-        """Load a TOML from anywhere on disk, not just `configs/`.
-
-        The path is remembered, so pressing Start writes back to the file you opened rather than
-        quietly forking a copy into `configs/` -- which would leave two files with the same name
-        and no way to tell which one a run actually used.
-        """
+        """Load a TOML from anywhere; saves make a copy in the managed folder."""
         start = usable_dialog_start(
-            str(self._current_path) if self._current_path else None, str(CONFIG_DIR))
+            str(self._current_path) if self._current_path else None, str(self.config_dir))
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self, "Open config", start, "TOML configs (*.toml);;All files (*)")
         if not path:
@@ -597,28 +751,34 @@ class TrainingGUI(QtWidgets.QWidget):
             self._applying = False
         self._last_optimizer_kind = flat.get("optimizer.kind")
         self._last_adapter_selection = (flat.get("adapter.kind"), flat.get("adapter.lycoris_algo"))
+        self._lock_moss_sampling()
         self._refresh()
 
     def collect(self) -> dict:
-        return {**getattr(self, "_cli_values", {}),
+        flat = {**getattr(self, "_cli_values", {}),
                 **{key: editor.get() for key, editor in self.editors.items()}}
+        if self.editors["dataset.subsets"].table.rowCount():
+            # Even an unfinished subset row switches away from the single-folder
+            # source. Do not accidentally launch on the old, now-disabled folder.
+            flat["dataset.path"] = None
+        return flat
 
     def _managed_target(self, flat: dict) -> Path:
-        """Where a Save/Start should land: `configs/<run_name>.toml`.
+        """Where a Save/Start should land: `<configured folder>/<run_name>.toml`.
 
         The config file is *named by* `run_name`. Keeping the two in sync by hand is the thing this
         removes -- and they were never independent anyway, since `run_name` already decides the
         checkpoint stem (`out_dir/<run_name>.safetensors`) and the copy of the TOML the trainer
         writes beside it. One name, three places.
         """
-        return CONFIG_DIR / f"{safe_stem(flat.get('train.run_name'))}.toml"
+        return self.config_dir / f"{safe_stem(flat.get('train.run_name'))}.toml"
 
     def _persist(self, flat: dict) -> Path | None:
         """Write `flat` to the managed config and return where it went, or None if cancelled.
 
-        Two rules, both about not destroying a file the user did not mean to touch:
+        Rules about not destroying a file the user did not mean to touch:
 
-        **A config opened from outside `configs/` is never written back to.** Saving copies it in
+        **A config opened from outside the managed folder is never written back to.** Saving copies it in
         instead, and the original is left exactly as it was. Opening someone's config to read its
         settings, tweaking a knob and pressing Start used to rewrite their file in place -- and
         `write_toml` regenerates the TOML, so their comments went with it.
@@ -636,12 +796,12 @@ class TrainingGUI(QtWidgets.QWidget):
         target = self._managed_target(flat)
         src = self._current_path
         src_resolved = src.resolve() if src is not None and src.exists() else None
-        external = src is not None and src.parent.resolve() != CONFIG_DIR.resolve()
+        external = src is not None and src.parent.resolve() != self.config_dir.resolve()
 
         if target.exists() and (src_resolved is None or target.resolve() != src_resolved):
             answer = QtWidgets.QMessageBox.question(
                 self, "Config already exists",
-                f"{target.name} already exists in configs/.\n\n"
+                f"{target.name} already exists in {self.config_dir}.\n\n"
                 f"run_name is {flat.get('train.run_name')!r}, which also names the checkpoints "
                 f"(output/{flat.get('train.run_name')}.safetensors). Two runs sharing it overwrite "
                 f"each other's output as well as this file.\n\nOverwrite it?",
@@ -657,10 +817,31 @@ class TrainingGUI(QtWidgets.QWidget):
         elif src_resolved is not None and target.resolve() != src_resolved:
             self.log(f"run_name changed -- saved as {target.name}, {src.name} left as it was")
 
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        bridge.write_toml(target, flat)
+        try:
+            self.config_dir.mkdir(parents=True, exist_ok=True)
+            bridge.write_toml(target, flat)
+        except OSError as exc:
+            self.log(f"Could not save {target}: {exc}")
+            return None
         self._current_path = target
         return target
+
+    def _training_config(self, flat):
+        if self.autosave_chk.isChecked():
+            path = self._persist(flat)
+            if path is not None:
+                self._load_presets(select=path, apply=False)
+            return path
+        path = self._temporary_config_dir() / f"{safe_stem(flat.get('train.run_name'))}.toml"
+        bridge.write_toml(path, flat)
+        self.log(f"Autosave off: training uses temporary config {path}")
+        return path
+
+    def _temporary_config_dir(self):
+        import tempfile
+        directory = tempfile.TemporaryDirectory(prefix="mageflow-gui-")
+        self._launch_configs.append(directory)
+        return Path(directory.name)
 
     def _save(self):
         path = self._persist(self.collect())
@@ -673,7 +854,7 @@ class TrainingGUI(QtWidgets.QWidget):
         # A real file dialog rather than a name prompt, so a config can be saved beside the dataset
         # or the run it belongs to. Defaults to `configs/`, which is where it used to be forced.
         start = usable_dialog_start(
-            str(self._current_path) if self._current_path else None, str(CONFIG_DIR))
+            str(self._current_path) if self._current_path else None, str(self.config_dir))
         chosen, _ = QtWidgets.QFileDialog.getSaveFileName(
             self, "Save config as", start, "TOML configs (*.toml)")
         if not chosen:
@@ -681,7 +862,7 @@ class TrainingGUI(QtWidgets.QWidget):
         path = Path(chosen)
         if path.suffix != ".toml":
             path = path.with_suffix(".toml")
-        if path.parent.resolve() != CONFIG_DIR.resolve():
+        if path.parent.resolve() != self.config_dir.resolve():
             self._external.append(path)
         bridge.write_toml(path, self.collect())
         self._current_path = path
@@ -694,8 +875,23 @@ class TrainingGUI(QtWidgets.QWidget):
 
     # ---------------------------------------------------------------- reactivity
 
+    def _lock_moss_sampling(self):
+        if self.editors["flow.timestep_sample_method"].get() != "moss":
+            return
+        locked = {"flow.sigmoid_scale": 1.0, "flow.shift": 1.0, "flow.flux_shift": False}
+        changed = any(self.editors[key].get() != value for key, value in locked.items())
+        self._applying = True
+        try:
+            for key, value in locked.items():
+                self.editors[key].set(value)
+        finally:
+            self._applying = False
+        if changed:
+            self.log("Kohaku MOSS sampling: locked sigmoid_scale=1, shift=1, flux_shift=false")
+
     def _on_edit(self):
         if not self._applying:
+            self._lock_moss_sampling()
             kind = self.editors["optimizer.kind"].get()
             if kind != getattr(self, "_last_optimizer_kind", kind) and kind in OPTIMIZERS:
                 self._applying = True
@@ -719,6 +915,21 @@ class TrainingGUI(QtWidgets.QWidget):
 
     def _refresh(self):
         flat = self.collect()
+        self.timestep_plot.set_config(flat)
+        has_subsets = self.editors["dataset.subsets"].table.rowCount() > 0
+        for key in ("dataset.path", "dataset.num_repeats"):
+            self.editors[key].set_enabled(not has_subsets)
+            for widget in self.rows[key]:
+                widget.setEnabled(not has_subsets)
+        # Never hide an enabled experiment loaded from a TOML. Visibility is a UI
+        # preference; it must not silently mutate or conceal the training config.
+        active_experiment = any(flat.get(k) for k in (
+            "self_flow.enabled", "flow.dual_timestep", "rti.enabled",
+            "perceptual.enabled", "adversarial.enabled",
+        ))
+        if active_experiment:
+            self.experimental_chk.setChecked(True)
+        self.experimental_chk.setEnabled(not active_experiment)
         for key, rule in _RULES.items():
             editor = self.editors.get(key)
             if editor is None:
@@ -736,7 +947,10 @@ class TrainingGUI(QtWidgets.QWidget):
         flat = self.collect()
 
         ok, err = bridge.validate(flat)
-        running = self.runner is not None and self.runner.isRunning()
+        running = self.runner is not None or bool(self._queue) or self._batch_queue_active
+        self.run_queue.set_busy(running)
+        for box in self.gpu_boxes.values():
+            box.setEnabled(not running)
 
         # Advisories are evaluated against the GPU SELECTION, not just the config -- the two worst
         # ones cannot be seen from the file alone. An "error" advisory blocks Start, because the
@@ -745,6 +959,10 @@ class TrainingGUI(QtWidgets.QWidget):
         notes = bridge.advisories(flat, self.num_processes())
         blocking = [m for lvl, m in notes if lvl == "error"]
         self.start_btn.setEnabled(ok and not running and not blocking)
+        # The queue has its own Start button; do not offer the unrelated editor's
+        # single-run action while viewing queued TOMLs.
+        self.start_btn.setVisible(not running and self.tab_bar.currentIndex() != self.queue_tab)
+        self.stop_btn.setVisible(running)
         # Pressing Start means something different with the box ticked, so it should not still say
         # "Start Training" -- two trainings and a merge is not what that label promises.
         self.start_btn.setText(
@@ -781,6 +999,7 @@ class TrainingGUI(QtWidgets.QWidget):
             self.log("A process is already running.")
             return
         self._on_failure = on_failure
+        self._running_training = training
         if runner is None:
             try:
                 env = training_env(self.gpu_arg())
@@ -800,7 +1019,7 @@ class TrainingGUI(QtWidgets.QWidget):
         self.log("\n" + "=" * 60 + f"\n{header}\n" + "=" * 60)
         self.tab_bar.setCurrentIndex(self.tab_bar.count() - (2 if training else 1))
         if training:
-            self.metrics.clear_data()
+            self.metrics.start_run()
             prevent_sleep(True)
         self.start_btn.setVisible(False)
         self.stop_btn.setVisible(True)
@@ -809,7 +1028,64 @@ class TrainingGUI(QtWidgets.QWidget):
         self._refresh()
         self.runner.start()
 
+    def _start_queue(self):
+        from ..training.config import load_config
+
+        if self.runner is not None or self._queue or self._batch_queue_active:
+            return
+        jobs = []
+        destinations = set()
+        try:
+            for index, path in enumerate(self.run_queue.paths()):
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                cfg = load_config(path)
+                flat = bridge.flatten(asdict(cfg))
+                errors = [text for level, text in bridge.advisories(flat, self.num_processes()) if level == "error"]
+                if errors:
+                    raise ValueError("; ".join(errors))
+                destination = ((PROJECT_ROOT / cfg.train.output_dir).resolve(), cfg.train.run_name)
+                if destination in destinations:
+                    raise ValueError(f"Duplicate output directory/run_name: {destination}. Give each queued run a distinct name.")
+                destinations.add(destination)
+                steps = self._cache_jobs(flat) + [Job(train_launch(path, self.num_processes()), training=True)]
+                jobs.extend(replace(job, config_path=path, config_digest=digest, queue_index=index) for job in steps)
+        except Exception as exc:
+            message = f"Queue validation failed for {path}: {exc}"
+            self.log(message)
+            self.run_queue.status.setText(message)
+            return
+        if not jobs:
+            return
+        self._batch_queue_active = True
+        self._queue_cancelled = False
+        self.run_queue.reset_status()
+        self._queue = jobs[1:]
+        self.log(f"Starting queue: {len(self.run_queue.paths())} TOMLs, {len(jobs)} cache/train steps.")
+        self._run_job(jobs[0])
+
+    def _run_job(self, job):
+        self._active_queue_index = job.queue_index
+        if job.config_path is not None:
+            try:
+                if hashlib.sha256(job.config_path.read_bytes()).hexdigest() != job.config_digest:
+                    raise ValueError(f"Queued TOML changed after validation: {job.config_path}. Restart the queue to use the edited file.")
+            except (OSError, ValueError) as exc:
+                self.log(str(exc))
+                self._queue = []
+                self._batch_queue_active = False
+                self.run_queue.mark(job.queue_index, "Failed")
+                self.run_queue.end(str(exc))
+                self._active_queue_index = None
+                self.start_btn.setVisible(True)
+                self.stop_btn.setVisible(False)
+                self._refresh()
+                return
+            self.run_queue.mark(job.queue_index, "Training" if job.training else "Caching")
+        self._run(job.launch, job.training, job.on_failure)
+
     def _finished(self, code):
+        if getattr(self, "_running_training", False):
+            self.metrics.finish_run()
         prevent_sleep(False)
         self.start_btn.setVisible(True)
         self.stop_btn.setVisible(False)
@@ -823,8 +1099,6 @@ class TrainingGUI(QtWidgets.QWidget):
         # emit has returned.
         self._retired, self.runner = self.runner, None
         QtCore.QTimer.singleShot(0, lambda: setattr(self, "_retired", None))
-        self._refresh()
-
         if code != 0 and self._on_failure == "stop" and self._queue:
             # Every later step depends on this one having produced its output, so carrying on would
             # not salvage anything -- it would produce a plausible-looking artifact built on a
@@ -832,13 +1106,26 @@ class TrainingGUI(QtWidgets.QWidget):
             self.log(f"Chain stopped: {len(self._queue)} remaining step(s) skipped.")
             self._queue = []
 
+        if self._batch_queue_active:
+            status = "Stopped" if self._queue_cancelled else ("Failed" if code else "Completed")
+            if code or self._queue_cancelled or self._running_training:
+                self.run_queue.mark(self._active_queue_index, status)
+            if not self._queue:
+                self._batch_queue_active = False
+                self.run_queue.end("Queue completed." if status == "Completed" else f"Queue {status.lower()}.")
+                self._active_queue_index = None
+        self.start_btn.setVisible(not bool(self._queue))
+        self.stop_btn.setVisible(bool(self._queue))
+        self._refresh()
+
         if self._queue:
             # `_run` refuses to start while a runner is live, so this waits for the next event-loop
             # turn -- `self.runner` is already None above, but the QThread it referred to is still
             # finishing.
             nxt = self._queue.pop(0)
+            generation = self._queue_generation
             QtCore.QTimer.singleShot(
-                0, lambda: self._run(nxt.launch, nxt.training, nxt.on_failure))
+                0, lambda: self._run_job(nxt) if generation == self._queue_generation else None)
 
     def _start(self):
         if self.pipeline_chk.isChecked():
@@ -853,10 +1140,9 @@ class TrainingGUI(QtWidgets.QWidget):
         # variant that a later "why did it use that value" cannot account for. It goes through
         # `_persist` for the same reason Save does: starting a run must not rewrite a config that
         # was opened from somewhere else on disk.
-        path = self._persist(flat)
+        path = self._training_config(flat)
         if path is None:
             return
-        self._load_presets(select=path)
         self._run_dir = (Path(flat.get("train.output_dir") or "output")
                          / (flat.get("train.run_name") or "mageflow"))
         if self.remote is not None:
@@ -890,13 +1176,7 @@ class TrainingGUI(QtWidgets.QWidget):
     )
 
     def _arm_config(self, flat: dict, suffix: str, init: str, preserve: bool) -> Path | None:
-        """Write one arm's config to `configs/generated/` and return the path.
-
-        Generated configs live in their own directory and are overwritten without asking, which is
-        the opposite of `_persist`'s rule for hand-written ones. Keeping them on disk rather than
-        in a temp file is deliberate: what ran is inspectable afterwards, and the trainer reads a
-        file either way.
-        """
+        """Save a generated arm, or use a temporary TOML when autosave is off."""
         arm = dict(flat)
         base = safe_stem(flat.get("train.run_name")) or "run"
         arm["train.run_name"] = f"{base}-{suffix}"
@@ -911,7 +1191,7 @@ class TrainingGUI(QtWidgets.QWidget):
             self.log(f"CONFIG ERROR ({suffix} arm): {err}")
             return None
 
-        out_dir = CONFIG_DIR / "generated"
+        out_dir = self.config_dir / "generated" if self.autosave_chk.isChecked() else self._temporary_config_dir()
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"{arm['train.run_name']}.toml"
         bridge.write_toml(path, arm)
@@ -1019,12 +1299,24 @@ class TrainingGUI(QtWidgets.QWidget):
         self._run(first.launch, first.training, first.on_failure)
 
     def _stop(self):
+        self._queue_generation += 1
+        self._queue_cancelled = True
         # Drop the rest of the queue first: Stop means stop, not "skip to the next folder".
         if self._queue:
             self.log(f"Stopped -- {len(self._queue)} queued step(s) skipped.")
             self._queue = []
         if self.runner is not None and self.runner.isRunning():
             self.runner.stop()
+        elif self._batch_queue_active:
+            self._batch_queue_active = False
+            if (self._active_queue_index is not None and
+                    self.run_queue.list.item(self._active_queue_index).text().startswith(("Caching —", "Training —"))):
+                self.run_queue.mark(self._active_queue_index, "Stopped")
+            self.run_queue.end("Queue stopped.")
+            self._active_queue_index = None
+            self.start_btn.setVisible(True)
+            self.stop_btn.setVisible(False)
+            self._refresh()
 
     def _dataset_paths(self, flat: dict) -> list[str]:
         """Every directory this config actually reads images from, in config order.
@@ -1269,15 +1561,19 @@ class TrainingGUI(QtWidgets.QWidget):
             if answer != QtWidgets.QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
-            self.runner.stop()
+        self._stop()
         prevent_sleep(False)
         event.accept()
 
 
 def main():
-    app = QtWidgets.QApplication(sys.argv)
+    import argparse
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--config-dir", help="Remember this folder for GUI TOML saves")
+    options, _ = parser.parse_known_args(sys.argv[1:])
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     app.setStyleSheet(STYLESHEET)
     app.setApplicationName("Mage-Flow Trainer")
-    window = TrainingGUI()
+    window = TrainingGUI(config_dir=options.config_dir)
     window.show()
     sys.exit(app.exec())

@@ -9,7 +9,9 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 from torch.nn import functional as F
-from torch.utils.checkpoint import checkpoint
+from trainer.training.activation_offload import (
+    checkpoint_with_offload, configure_activation_offload,
+)
 
 
 class _RMSNorm(nn.Module):
@@ -227,7 +229,16 @@ class MOSSImage(nn.Module):
         compile_mode=None,
         compile_dynamic=True,
         attention_backend="sdpa",
+        activation_offload=False,
+        activation_offload_budget_mb=1024,
+        activation_offload_pin_memory=False,
+        activation_offload_prefetch=False,
     ):
+        configure_activation_offload(
+            self, enabled=activation_offload, budget_mb=activation_offload_budget_mb,
+            pin_memory=activation_offload_pin_memory, prefetch=activation_offload_prefetch,
+            gradient_checkpointing=gradient_checkpointing, compile_mode=compile_mode,
+        )
         if (
             attention_backend not in ("sdpa", "torch_varlen")
             or checkpoint_blocks is not None
@@ -266,7 +277,7 @@ class MOSSImage(nn.Module):
 
     def _run(self, fn, block, *args):
         if self.checkpointing and self.training and torch.is_grad_enabled():
-            return checkpoint(fn, block, *args, use_reentrant=False)
+            return checkpoint_with_offload(self, fn, block, *args)
         return fn(block, *args)
 
     def forward(

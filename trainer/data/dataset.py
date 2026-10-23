@@ -230,6 +230,7 @@ class DatasetConfig:
     # where the crop is chosen per step and so cannot be precomputed (see the texture curriculum);
     # for ordinary training it is strictly worse -- a VAE forward every step, forever, plus the VAE
     # resident in VRAM, to reproduce a tensor that never changes.
+    cache_validation: str = "warn"  # warn permits legacy caches; strict requires provenance; off bypasses
     source: str = "auto"  # "images" | "latents" | "encode" | "auto"
     # Storage precision for latents cached from this config (`cache_latents cache-config`, the
     # GUI's Cache button). float16 halves the cache on disk; training reads either. Existing
@@ -240,6 +241,8 @@ class DatasetConfig:
     texture: TextureConfig = field(default_factory=TextureConfig)
 
     def __post_init__(self):
+        if self.cache_validation not in ("warn", "strict", "off"):
+            raise ValueError("dataset.cache_validation must be warn, strict or off")
         self.subsets = [
             s if isinstance(s, SubsetConfig) else SubsetConfig(**s) for s in self.subsets
         ]

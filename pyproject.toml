@@ -32,7 +32,7 @@ dependencies = [
     "transformers>=4.51",  # >=4.51 for Qwen3
     "accelerate",
     "peft",
-    "lycoris-lora",
+    "lycoris-lora==4.1.3",
     "filelock",
     "safetensors",
     "sentencepiece",       # T5TokenizerFast slow-tokenizer fallback
@@ -50,6 +50,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+convrot = ["comfy-kitchen==0.2.37"]
 perceptual = ["lpips==0.1.4"]
 # Cosine optimal-transport noise pairing (models/trainer.py:39). CPU fallback is scipy.
 ot = ["scipy"]
@@ -58,7 +59,7 @@ gui = [
 ]
 
 [tool.uv.sources]
-lycoris-lora = { git = "https://github.com/KohakuBlueleaf/LyCORIS", rev = "4a6a333819356795d22170fe661a84f16b299b6b" }
+lycoris-lora = { git = "https://github.com/KohakuBlueleaf/LyCORIS", rev = "7abd5709f74f9159246ff9c6cc83bc0d5118b639" }
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 diffusers = { git = "https://github.com/huggingface/diffusers" }
@@ -76,4 +77,4 @@ build-backend = "setuptools.build_meta"
 include = ["trainer*"]
 
 [tool.setuptools.package-data]
-trainer = ["modeling/LICENSE.*", "modeling/modules/LICENSE.*", "modeling/assets/*.json", "modeling/assets/qwen3vl4b/*", "gui/LICENSE.*"]
+trainer = ["modeling/LICENSE.*", "modeling/modules/LICENSE.*", "modeling/assets/*.json", "modeling/assets/qwen3vl4b/*", "modeling/assets/moss_image/*", "gui/LICENSE.*"]

@@ -201,6 +201,7 @@ if [[ "${GUI_ONLY:-0}" == 1 ]]; then
     exit 0
 fi
 "$VPY" trainer/tools/check_install.py --require-gui
+"$VPY" -m trainer.tools.update_dependencies --record
 
 echo
 say "done.  Start the GUI with:  ./start-gui.sh"

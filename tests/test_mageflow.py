@@ -166,7 +166,7 @@ class MageFlowTests(unittest.TestCase):
             )
         )
         te = Mock(return_value=SimpleNamespace(hidden_states=[torch.randn(2, 39, 24)]))
-        c = SimpleNamespace(tokenizer=tok, text_encoder=te)
+        c = SimpleNamespace(tokenizer=tok, text_encoder=te, model_family="mage_flow")
         hidden, mask = encode_prompts(c, ["", "a cat"], "cpu", 5)
         self.assertEqual(hidden.shape, (2, 5, 24))
         self.assertEqual(mask.shape, (2, 5))

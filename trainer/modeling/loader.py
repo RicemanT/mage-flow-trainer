@@ -144,14 +144,16 @@ def load_components(
     encoder = tokenizer = vae = None
     encoder_source, tokenizer_source = text_sources(path, text_encoder_path, tokenizer_path)
     if family == 'moss_image':
-        encoder_source = Path(text_encoder_path) if text_encoder_path else path / 'text_encoder'
-        tokenizer_source = Path(tokenizer_path) if tokenizer_path else path / 'tokenizer'
+        from .moss_loader import component_config, text_sources as moss_text_sources
+        encoder_source, tokenizer_source = moss_text_sources(path, text_encoder_path, tokenizer_path)
     if load_text_encoder and family == 'moss_image':
         from transformers import AutoModel
-        if not encoder_source.is_dir():
-            raise ValueError('MOSS text encoder must be a local Hugging Face directory')
-        encoder = AutoModel.from_pretrained(encoder_source, torch_dtype=dtype,
-                                           attn_implementation='sdpa', local_files_only=True)
+        if encoder_source.is_file():
+            from .moss_text_loader import load_single_text_encoder
+            encoder = load_single_text_encoder(encoder_source, component_config(path, 'text_encoder'), dtype)
+        else:
+            encoder = AutoModel.from_pretrained(encoder_source, torch_dtype=dtype,
+                                               attn_implementation='sdpa', local_files_only=True)
         encoder.requires_grad_(False).eval()
     if load_text_encoder and family != 'moss_image':
         from transformers import Qwen3VLForConditionalGeneration
@@ -168,35 +170,9 @@ def load_components(
         )
     if load_vae:
         if flux2_vae or family in ("flux3", "moss_image"):
-            from diffusers import AutoencoderKLFlux2
+            from .flux2_vae_loader import load_flux2_vae
             source = Path(vae_path) if vae_path else path / "vae"
-            if source.is_dir():
-                vae = AutoencoderKLFlux2.from_pretrained(source, torch_dtype=torch.float32 if family in ("flux3", "moss_image") else dtype)
-            else:
-                state = load_file(str(source))
-                state = {k.removeprefix("first_stage_model.").removeprefix("module."): v for k, v in state.items()}
-                vae = AutoencoderKLFlux2()
-                result = vae.load_state_dict(state, strict=False)
-                if result.missing_keys or result.unexpected_keys:
-                    # ComfyUI's Flux2 VAE export uses the original LDM key layout.
-                    # Its Legacy engine already pixel-unshuffles and applies `bn` in
-                    # encode(), producing exactly Mage-Flow's 128c /16 latent layout.
-                    if "bn.running_mean" not in state or "encoder.quant_conv.weight" not in state:
-                        raise RuntimeError(f"FLUX.2 VAE load failed: missing={result.missing_keys}, unexpected={result.unexpected_keys}")
-                    import sys
-                    comfy_root = Path("/home/bluvoll/ComfyUI")
-                    if str(comfy_root) not in sys.path:
-                        sys.path.insert(0, str(comfy_root))
-                    from comfy.ldm.models.autoencoder import AutoencodingEngineLegacy
-                    ddconfig = {"double_z": True, "z_channels": 32, "resolution": 256,
-                                "in_channels": 3, "out_ch": 3, "ch": 128,
-                                "ch_mult": [1, 2, 4, 4], "num_res_blocks": 2,
-                                "attn_resolutions": [], "dropout": 0.0,
-                                "batch_norm_latent": True}
-                    vae = AutoencodingEngineLegacy(embed_dim=32, ddconfig=ddconfig,
-                        regularizer_config={"target": "comfy.ldm.models.autoencoder.DiagonalGaussianRegularizer"})
-                    result = vae.load_state_dict(state, strict=True)
-                    vae.outputs_packed_flux2 = True
+            vae = load_flux2_vae(source, torch.float32 if family in ("flux3", "moss_image") else dtype)
         else:
             from .modules.mage_vae import MageVAE
             vae = MageVAE(str(vae_path or path / "vae/diffusion_pytorch_model.safetensors"), sample_posterior=False)

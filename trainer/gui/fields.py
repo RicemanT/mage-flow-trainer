@@ -783,28 +783,36 @@ class SubsetEditor(_Blockable):
         lay.setSpacing(4)
 
         hint = make_label(
-            "Leave empty to use the single Dataset path above. Add rows to train from several "
-            "folders with their own repeat counts."
+            "Add rows to use these folders instead of the single Dataset path above. "
+            "Remove all rows to restore the single folder. Each row has its own repeat count. "
+            "Click a row number to select it, then Remove selected. Ctrl/Shift selects multiple rows."
         )
         hint.setWordWrap(True)
         lay.addWidget(hint)
 
         self.table = QtWidgets.QTableWidget(0, len(self._HEADERS))
         self.table.setHorizontalHeaderLabels(self._HEADERS)
-        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setVisible(True)
+        self.table.verticalHeader().setSectionsClickable(True)
+        self.table.verticalHeader().setMinimumWidth(36)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         head = self.table.horizontalHeader()
         head.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
         for i in (1, 2):
-            head.setSectionResizeMode(i, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+            head.setSectionResizeMode(i, QtWidgets.QHeaderView.ResizeMode.Fixed)
+        head.resizeSection(1, 110)
+        head.resizeSection(2, max(130, self.table.fontMetrics().horizontalAdvance("Texture crops") + 28))
+        self.table.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Fixed)
         self.table.setMinimumHeight(110)
         lay.addWidget(self.table)
 
         row = QtWidgets.QHBoxLayout()
         row.setSpacing(6)
         self.add_btn = make_btn("Add folder")
-        self.del_btn = make_btn("Remove")
+        self.del_btn = make_btn("Remove selected")
+        self.del_btn.setEnabled(False)
         self.clear_btn = make_btn("Clear")
         for b in (self.add_btn, self.del_btn, self.clear_btn):
             row.addWidget(b)
@@ -815,6 +823,7 @@ class SubsetEditor(_Blockable):
         self.add_btn.clicked.connect(self._add_row)
         self.del_btn.clicked.connect(self._remove_row)
         self.clear_btn.clicked.connect(self._clear)
+        self.table.itemSelectionChanged.connect(self._update_remove_button)
 
     def _make_row(self, path, num_repeats, texture, index):
         # A plain QLineEdit + button rather than a nested PathEditor. PathEditor is a QObject
@@ -828,7 +837,8 @@ class SubsetEditor(_Blockable):
         hp.setSpacing(4)
         line = QtWidgets.QLineEdit(str(path or ""))
         browse = make_btn("...")
-        browse.setFixedWidth(32)
+        browse.setFixedWidth(max(36, browse.sizeHint().width()))
+        line.setMinimumWidth(100)
         hp.addWidget(line, 1)
         hp.addWidget(browse)
 
@@ -843,6 +853,8 @@ class SubsetEditor(_Blockable):
         reps.setLocale(QtCore.QLocale.c())
         reps.setRange(1, 1000)
         reps.setValue(int(num_repeats))
+        reps.setMinimumWidth(100)
+        self.table.horizontalHeader().resizeSection(1, max(110, reps.sizeHint().width() + 12))
         tex = QtWidgets.QCheckBox()
         tex.setChecked(bool(texture))
         tex.setToolTip(
@@ -861,6 +873,9 @@ class SubsetEditor(_Blockable):
         self.table.setCellWidget(index, 0, holder_path)
         self.table.setCellWidget(index, 1, reps)
         self.table.setCellWidget(index, 2, holder)
+        self.table.setRowHeight(index, max(40, line.sizeHint().height() + 8,
+                                           reps.sizeHint().height() + 8,
+                                           browse.sizeHint().height() + 8))
         line.textChanged.connect(self._emit)
         reps.valueChanged.connect(self._emit)
         tex.toggled.connect(self._emit)
@@ -879,12 +894,15 @@ class SubsetEditor(_Blockable):
         self._make_row("", 1, False, i)
         self._emit()
 
+    def _update_remove_button(self):
+        self.del_btn.setEnabled(bool(self.table.selectionModel().selectedRows()))
+
     def _remove_row(self):
-        rows = sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True)
-        if not rows:
-            rows = [self.table.rowCount() - 1] if self.table.rowCount() else []
+        rows = sorted((i.row() for i in self.table.selectionModel().selectedRows()), reverse=True)
         for r in rows:
             self.table.removeRow(r)
+        self.table.clearSelection()
+        self._update_remove_button()
         self._emit()
 
     def _clear(self):

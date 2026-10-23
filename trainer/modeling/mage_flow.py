@@ -3,7 +3,9 @@
 from dataclasses import dataclass
 import torch
 from torch import nn
-from torch.utils.checkpoint import checkpoint
+from trainer.training.activation_offload import (
+    checkpoint_with_offload, configure_activation_offload,
+)
 from .modules.mage_layers import (
     AdaLayerNormContinuous,
     MageFlowEmbedRope,
@@ -143,7 +145,16 @@ class MageFlow(nn.Module):
         compile_mode=None,
         compile_dynamic=True,
         attention_backend="sdpa",
+        activation_offload=False,
+        activation_offload_budget_mb=1024,
+        activation_offload_pin_memory=False,
+        activation_offload_prefetch=False,
     ):
+        configure_activation_offload(
+            self, enabled=activation_offload, budget_mb=activation_offload_budget_mb,
+            pin_memory=activation_offload_pin_memory, prefetch=activation_offload_prefetch,
+            gradient_checkpointing=gradient_checkpointing, compile_mode=compile_mode,
+        )
         validate_attention_backend(attention_backend)
         depth = len(self.transformer_blocks)
         if checkpoint_blocks is not None:
@@ -275,7 +286,7 @@ class MageFlow(nn.Module):
                 token_ids,
             )
             if self.training and i in self.checkpoint_blocks:
-                txt, img = checkpoint(self.block_forward, *args, use_reentrant=False)
+                txt, img = checkpoint_with_offload(self, self.block_forward, *args)
             else:
                 txt, img = self.block_forward(*args)
             if self.region_interface is not None and i + 1 == self.region_interface.core_end:
@@ -391,7 +402,7 @@ class MageFlow(nn.Module):
                 (img_ids, txt_ids),
             )
             if self.training and i in self.checkpoint_blocks:
-                txt, img = checkpoint(self.block_forward, *args, use_reentrant=False)
+                txt, img = checkpoint_with_offload(self, self.block_forward, *args)
             else:
                 txt, img = self.block_forward(*args)
             if self.region_interface is not None and i + 1 == self.region_interface.core_end:

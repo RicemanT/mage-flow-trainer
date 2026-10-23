@@ -55,6 +55,7 @@ def config_cache_args(args) -> argparse.Namespace:
         overwrite=args.overwrite, allow_missing_captions=args.allow_missing_captions,
         dry_run=args.dry_run, device=args.device, batch_size=args.batch_size,
         devices=args.devices, shard_index=args.shard_index, num_shards=args.num_shards,
+        cache_validation=cfg.dataset.cache_validation,
     )
 
 
@@ -193,21 +194,6 @@ def cmd_cache(args) -> int:
     # weights into MageVAE and fail several seconds after planning the cache.
     from ..modeling.loader import resolve_model_family
     args.flux2_vae = resolve_model_family(args.model_path, args.model_family) in ('flux3', 'moss_image') or bool(args.flux2_vae or "flux2" in Path(args.vae_path or "").name.lower())
-    # The common ComfyUI `flux2-vae.safetensors` export is the legacy LDM
-    # implementation. Its compatible module is shipped with ComfyUI and is
-    # compiled for ComfyUI's Python, not this trainer's virtualenv. Re-exec
-    # only that cache operation there; training subsequently reads ordinary
-    # safetensor latents and remains in this environment.
-    if args.flux2_vae and args.vae_path and Path(args.vae_path).is_file():
-        from safetensors import safe_open
-        with safe_open(str(args.vae_path), framework="pt") as handle:
-            legacy_comfy_flux2 = "bn.running_mean" in handle.keys() and "encoder.quant_conv.weight" in handle.keys()
-        comfy_python = Path("/home/bluvoll/ComfyUI/venv/bin/python")
-        if legacy_comfy_flux2 and Path(sys.executable).resolve() != comfy_python.resolve():
-            if not comfy_python.is_file():
-                raise RuntimeError("This legacy ComfyUI FLUX.2 VAE needs /home/bluvoll/ComfyUI/venv/bin/python for caching.")
-            print("restarting cache under ComfyUI's Python for the legacy FLUX.2 VAE", flush=True)
-            os.execv(str(comfy_python), [str(comfy_python), *sys.argv])
     vae_label = "FLUX.2" if args.flux2_vae else "Mage"
     print(f"\nloading {vae_label} VAE from {args.vae_path or args.model_path}")
     components = load_components(
@@ -217,7 +203,10 @@ def cmd_cache(args) -> int:
         flux2_vae=args.flux2_vae,
         load_text_encoder=False, load_vae=True, load_tokenizers=False, load_transformer=False,
     )
+    from ..data.cache_provenance import vae_identity
+    provenance = vae_identity(args.model_path, args.vae_path, args.model_family, args.flux2_vae)
     cacher = LatentCacher(components.vae, device=args.device, flux2_vae=args.flux2_vae,
+                          provenance=provenance, cache_validation=args.cache_validation,
                           storage_dtype=storage)
     print(f"storing latents as {args.latent_dtype}")
 
@@ -234,9 +223,8 @@ def cmd_cache(args) -> int:
             batch = paths[start:start + args.batch_size]
             pending = [path for path in batch if args.overwrite or not cache_path(path, bucket).exists()]
             skipped += len(batch) - len(pending)
-            if pending:
-                cacher.cache_batch(pending, managers[tier], overwrite=args.overwrite)
-                done += len(pending)
+            written = cacher.cache_batch(batch, managers[tier], overwrite=args.overwrite)
+            done += len(written)
             seen += len(batch)
             if seen % every < len(batch) or seen == total:
                 print(f"  {seen}/{total} cache entries  cached {done}, skipped {skipped}", flush=True)
@@ -432,6 +420,7 @@ def main() -> int:
                    help="storage precision; float16 halves the cache on disk")
     c.add_argument("--model-path", default=DEFAULT_MODEL_PATH)
     c.add_argument("--model-family", choices=["auto", "mage_flow", "flux3", "moss_image"], default="auto")
+    c.add_argument("--cache-validation", choices=("warn", "strict", "off"), default="warn")
     c.add_argument("--vae-path", help="Separate Mage-Flow VAE .safetensors (overrides --model-path)")
     c.add_argument("--flux2-vae", action="store_true", help="Experimental: encode with FLUX.2 VAE, pack 32c/8x to 128c/16x, and apply vae_bn normalization")
     c.add_argument("--resolution", type=int, nargs="+", default=[1024],

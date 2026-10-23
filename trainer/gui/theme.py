@@ -92,6 +92,9 @@ QGroupBox {{
     font-size: 8pt;
 }}
 QGroupBox[uiRole="section"] {{ background-color: {t.surface}; }}
+QGroupBox[collapsible="true"] {{ margin-top: 0; padding: 2px; }}
+QGroupBox[collapsible="true"] QToolButton {{ text-align: left; border: none; padding: 5px; color: {t.accent_alt}; font-weight: bold; }}
+QGroupBox[collapsible="true"][semanticColor="transformed"] QToolButton {{ color: {t.warning}; }}
 QGroupBox[uiRole="flat"] {{ margin-top: 0; padding: 0; }}
 QGroupBox QGroupBox {{ background-color: {t.nested_group}; }}
 QGroupBox[groupSurface="inner"] {{ background-color: #11141d; }}

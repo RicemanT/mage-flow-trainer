@@ -75,7 +75,7 @@ jinja2==3.1.6
     # via torch
 loguru==0.7.3
     # via mageflow-trainer
-lycoris-lora @ git+https://github.com/KohakuBlueleaf/LyCORIS@4a6a333819356795d22170fe661a84f16b299b6b
+lycoris-lora @ git+https://github.com/KohakuBlueleaf/LyCORIS@7abd5709f74f9159246ff9c6cc83bc0d5118b639
     # via mageflow-trainer
 markdown-it-py==4.2.0
     # via rich

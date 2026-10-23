@@ -10,6 +10,21 @@ from safetensors.torch import load_file
 from .moss_image import MOSSImage, MOSSParams
 
 TEXT_TEMPLATE_VERSION = "moss-chat-thinking-v1"
+ASSETS = Path(__file__).with_name("assets") / "moss_image"
+
+
+def component_config(root, component):
+    local = Path(root) / component / "config.json"
+    return local if local.is_file() else ASSETS / f"{component}_config.json"
+
+
+def text_sources(root, text_encoder_path=None, tokenizer_path=None):
+    root = Path(root)
+    encoder = Path(text_encoder_path) if text_encoder_path else root / "text_encoder"
+    tokenizer = Path(tokenizer_path) if tokenizer_path else root / "tokenizer"
+    if not tokenizer_path and not tokenizer.is_dir():
+        tokenizer = ASSETS
+    return encoder, tokenizer
 
 
 def weight_files(source):
@@ -31,7 +46,9 @@ def weight_files(source):
 
 def load_transformer(root, source, dtype):
     root = Path(root)
-    config = json.loads((root / "transformer/config.json").read_text())
+    config = json.loads(
+        component_config(root, "transformer").read_text(encoding="utf-8")
+    )
     params = MOSSParams(
         **{f.name: config[f.name] for f in fields(MOSSParams) if f.name in config}
     )
@@ -51,10 +68,25 @@ def load_transformer(root, source, dtype):
         v.is_floating_point() is False or v.element_size() < 2 for v in state.values()
     ):
         raise ValueError("Load unquantized MOSS weights, then apply SDNQ")
-    if "layers.0.proj.qkv.weight" in state:
-        raise ValueError(
-            "Use native separate-q/k/v MOSS weights, not a fused inference export"
-        )
+    # ComfyUI BF16 exports concatenate Q, K, V along the output dimension.
+    # Text-refiner qkv tensors are already native and must remain fused.
+    converted = 0
+    for i in range(params.num_layers):
+        prefix = f"layers.{i}.proj."
+        key = prefix + "qkv.weight"
+        if key not in state:
+            continue
+        weight = state.pop(key)
+        if tuple(weight.shape) != (3 * params.dim, params.dim):
+            raise ValueError(f"{key}: expected {(3 * params.dim, params.dim)}, got {tuple(weight.shape)}")
+        for name, part in zip(("q", "k", "v"), weight.chunk(3, dim=0)):
+            target = prefix + name + ".weight"
+            if target in state:
+                raise ValueError(f"Ambiguous MOSS checkpoint: both {key} and {target}")
+            state[target] = part.clone()
+        converted += 1
+    if converted:
+        print(f"MOSS transformer: split fused Q/K/V weights in {converted} blocks into native training tensors")
     # ComfyUI exports may omit this derived constant.
     if "rope.bands" not in state:
         state["rope.bands"] = model.rope._default_bands(torch.device("cpu"))

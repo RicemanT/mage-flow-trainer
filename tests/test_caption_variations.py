@@ -99,6 +99,8 @@ class EncoderFingerprintTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             cfg = self.config(folder)
             original = encoder_fingerprint(cfg)
+            cfg.quant = replace(cfg.quant, backend="convrot")
+            self.assertEqual(original, encoder_fingerprint(cfg))
             cfg.quant = replace(
                 cfg.quant,
                 mode="training",
@@ -147,6 +149,7 @@ class EncoderFingerprintTests(unittest.TestCase):
             cfg = self.config(folder)
             old_quant = asdict(cfg.quant)
             old_quant.pop("text_encoder_weights_dtype", None)
+            old_quant.pop("backend", None)
             old_key = digest(
                 {**_encoder_fingerprint_payload(cfg), "quant": old_quant}
             )

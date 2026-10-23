@@ -91,6 +91,8 @@ def test_trainer_detail_loss_integration(monkeypatch,packed):
     cfg=Config(dataset=DatasetConfig(path="/tmp"));cfg.train.pack_resolutions=packed;cfg.flow.hf_scale=.2
     cfg.paired_texture=PairedTextureConfig(scale=.1,tokens=16,features=8)
     trainer=Trainer.__new__(Trainer)
+    from trainer.training.flow_rng import FlowRNG
+    trainer.flow_rng = FlowRNG(42, 0, 1, 'cpu')
     trainer.cfg=cfg;trainer.accelerator=SimpleNamespace(device=torch.device('cpu'))
     trainer.dtype=torch.float32;trainer.phase=None;trainer.self_flow_ema=None
     trainer.rti_interface=None;trainer.adversarial=None;trainer.perceptual=None

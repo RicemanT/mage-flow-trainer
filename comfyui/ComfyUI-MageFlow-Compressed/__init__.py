@@ -7,4 +7,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {"LoadCompressedMageFlow": "Load Compressed Mage-Fl
 NODE_CLASS_MAPPINGS["LoadCompressedRTIMageFlow"] = LoadCompressedRTIMageFlow
 NODE_DISPLAY_NAME_MAPPINGS["LoadCompressedRTIMageFlow"] = "Load Compressed RTI Mage-Flow"
 NODE_CLASS_MAPPINGS["MageFlowWeightedTextEncode"] = MageFlowWeightedTextEncode
-NODE_DISPLAY_NAME_MAPPINGS["MageFlowWeightedTextEncode"] = "Mage-Flow Weighted Text Encode"
+NODE_DISPLAY_NAME_MAPPINGS["MageFlowWeightedTextEncode"] = "Mage-Flow / MOSS-Image Weighted Text Encode"

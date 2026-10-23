@@ -37,10 +37,12 @@ is also selectable.
 
 ## Weighted prompts (experimental)
 
-Use **Mage-Flow Weighted Text Encode** under `conditioning/mage-flow` in place
-of ordinary text encoding. Connect Load CLIP (type **mage**) to its `clip` input
+Use **Mage-Flow / MOSS-Image Weighted Text Encode** under `conditioning/mage-flow` in place
+of ordinary text encoding. Connect Load CLIP (type **mage** or **moss_image**) to its `clip` input
 and its CONDITIONING output to the sampler's positive or negative conditioning.
-This works with both full and compressed Mage-Flow transformers.
+This works with both full and compressed Mage-Flow transformers and MOSS-Image.
+The node detects the encoder and preserves its native chat template; MOSS keeps
+its whitespace trimming and open thinking block. Existing Mage workflows remain compatible.
 
 Example: `a landscape, (night sky:1.5), (clouds:0.8)`. Parentheses without a
 number use ComfyUI's default emphasis; escape literal parentheses as `\(` and
@@ -57,6 +59,8 @@ chat templates and reference-image prompts are not supported by this node.
 
 Run `verify_weighted_text.py COMFY_DIRECTORY` with ComfyUI's Python for tokenizer
 checks; add `--encoder /path/to/qwen3vl_4b_bf16.safetensors` to test real embeddings.
+For MOSS, add `--model-type moss_image` and optionally
+`--encoder /path/to/qwen3.5_9b.safetensors`.
 
 ## Supported checkpoints
 

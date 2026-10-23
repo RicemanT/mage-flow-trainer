@@ -210,6 +210,11 @@ class TrainConfig:
     compile_text_encoder: bool = False
     text_encoder_embedding_only: bool = False
     max_text_tokens: int = 512
+    activation_offload: bool = False
+    activation_offload_budget_mb: int = 1024
+    activation_offload_pin_memory: bool = False
+    activation_offload_prefetch: bool = False
+    nonfinite_patience: int = 3
     gradient_checkpointing: bool = True
     dtype: str = "bfloat16"
     compressed_adaln_dtype: str = "float32"
@@ -225,6 +230,7 @@ class TrainConfig:
 
     save_every_steps: int | None = None
     save_every_epochs: int | None = 1
+    moss_qkv_format: str = "auto"  # auto: fused for supported MOSS exports; otherwise separated
     save_native: bool = True            # also write a ComfyUI-loadable single file
     keep_last_n: int | None = None
     resume_from: str | None = None
@@ -261,6 +267,8 @@ class TrainConfig:
     compile_regional: bool = True
 
     def __post_init__(self):
+        if self.moss_qkv_format not in ("auto", "separated", "fused"):
+            raise ValueError("train.moss_qkv_format must be auto, separated or fused")
         if self.model_family not in ("auto", "mage_flow", "flux3", "moss_image"):
             raise ValueError("train.model_family must be auto, mage_flow, flux3 or moss_image")
         if self.compile is False:
@@ -274,6 +282,14 @@ class TrainConfig:
         for name in ("compile_text_encoder", "text_encoder_embedding_only"):
             if type(getattr(self, name)) is not bool:
                 raise ValueError(f"train.{name} must be a boolean")
+        if type(self.nonfinite_patience) is not int or self.nonfinite_patience < 1:
+            raise ValueError("train.nonfinite_patience must be a positive integer")
+        if type(self.activation_offload_budget_mb) is not int or self.activation_offload_budget_mb < 1:
+            raise ValueError("activation_offload_budget_mb must be a positive integer (per rank)")
+        if self.activation_offload and (not self.gradient_checkpointing or self.compile):
+            raise ValueError("Activation offload requires gradient checkpointing and compile disabled")
+        if self.activation_offload_prefetch and not self.activation_offload_pin_memory:
+            raise ValueError("Activation prefetch requires pinned activation memory")
         if self.max_text_tokens < 1:
             raise ValueError("max_text_tokens must be positive")
         if self.attention_backend not in ("sdpa", "torch_varlen", "flash_attn_2", "flash_attn_3"):
@@ -559,6 +575,8 @@ def _build(cls, data: dict, path: str):
 
 
 def validate_model_options(cfg):
+    if cfg.train.activation_offload and cfg.self_flow.enabled:
+        raise ValueError("Activation offload does not yet support Self-Flow's alternate forward")
     if cfg.paired_texture.scale and (cfg.flow.dual_timestep or cfg.self_flow.enabled
                                      or any(p.mode == 'texture' for p in cfg.curriculum.phases)):
         raise ValueError('Paired texture loss requires scalar timesteps and unmasked images; '
@@ -569,6 +587,19 @@ def validate_model_options(cfg):
         raise ValueError('Eye adversarial experiment requires dedicated eye examples and perceptual.weight=0 (LPIPS off)')
     from ..modeling.loader import resolve_model_family
     cfg.train.model_family = resolve_model_family(cfg.train.model_path, cfg.train.model_family)
+    if cfg.train.moss_qkv_format == 'fused':
+        if cfg.train.model_family != 'moss_image':
+            raise ValueError("Fused QKV export is only supported for MOSS-Image")
+        if cfg.adapter.kind not in ('none', 'lora') and not (
+                cfg.adapter.kind == 'lycoris_lora' and cfg.adapter.lycoris_algo == 'locon'):
+            raise ValueError("Fused QKV export supports full finetuning and plain LoRA/LoCon; use separated for LoKr/DoRA")
+    if cfg.quant.backend == "convrot":
+        if (cfg.quant.mode != "frozen" or cfg.train.model_family != "moss_image"
+                or cfg.adapter.kind != "lycoris_lora" or cfg.adapter.lycoris_algo != "locon"
+                or not cfg.adapter.lycoris_bypass or cfg.adapter.init != "random"
+                or cfg.train.dtype != "bfloat16" or cfg.adapter.dtype != "bfloat16"):
+            raise ValueError("Experimental ConvRot requires MOSS, quant.mode='frozen', BF16 training "
+                             "and BF16 LyCORIS LoCon with bypass enabled and random initialization")
     if cfg.train.model_family in ('flux3', 'moss_image'):
         cfg.train.flux2_vae = True
         if (cfg.flow.dual_timestep or cfg.self_flow.enabled or cfg.rti.enabled or
@@ -681,6 +712,8 @@ def load_config(path: str | Path) -> Config:
             cfg.caption.load_protected_file()   # adds to an inline `protected_tags` list
             sections[f.name] = cfg
         else:
+            if f.name == "flow" and data.get("timestep_sample_method") == "moss":
+                data = {"shift": 1.0, **data}
             if f.name == "flow" and data.get("flux_shift") and "shift" not in data:
                 data = {**data, "shift": None}
             sections[f.name] = _build(_SECTIONS[f.name], data, f.name)
@@ -759,6 +792,12 @@ def load_config(path: str | Path) -> Config:
     if cfg.optimizer.kind.startswith("optimi_") and cfg.quant.mode == "training":
         raise ValueError("Optimi does not yet support SDNQ training tensors. Use quant.mode='none' "
                          "for full finetuning, or 'frozen' for adapters.")
+    if (cfg.quant.backend == "sdnq" and cfg.quant.mode == "frozen"
+            and cfg.quant.use_quantized_matmul is True):
+        raise ValueError(
+            "Frozen SDNQ quantized matmul has no supported input-gradient path for adapters. "
+            "Set quant.use_quantized_matmul=false (or 'auto') for storage-only quantization."
+        )
     if cfg.quant.mode == "frozen" and not cfg.is_lora:
         # A frozen-quantized base has no trainable weights at all, so this would run and produce
         # nothing. Caught here rather than after the model loads.

@@ -1,15 +1,29 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Weighted text-to-image conditioning without changing the Mage-Flow encoder."""
+"""Weighted text-to-image conditioning for Mage-Flow and MOSS-Image."""
 
 import math
 
 from comfy import sd1_clip
 from comfy.text_encoders.mage_flow import MageFlowTokenizer, MAGE_T2I_TEMPLATE
 
+# Mage-only ComfyUI installations can still use this node.
+try:
+    from comfy.text_encoders.moss_image import MOSSImageTokenizer
+except ModuleNotFoundError as exc:
+    if exc.name != "comfy.text_encoders.moss_image":
+        raise
+    MOSSImageTokenizer = None
+
+MOSS_T2I_TEMPLATE = "<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n<think>\n"
+
 
 def weighted_tokens(tokenizer, text):
-    if not isinstance(tokenizer, MageFlowTokenizer):
-        raise ValueError("Use Load CLIP with type mage for Mage-Flow weighted text.")
+    if isinstance(tokenizer, MageFlowTokenizer):
+        key, template, strip_prompt = "qwen3vl_4b", MAGE_T2I_TEMPLATE, False
+    elif MOSSImageTokenizer is not None and isinstance(tokenizer, MOSSImageTokenizer):
+        key, template, strip_prompt = "qwen35_9b", MOSS_T2I_TEMPLATE, True
+    else:
+        raise ValueError("Use Load CLIP with type mage or moss_image for weighted text.")
 
     segments = sd1_clip.token_weights(sd1_clip.escape_important(text), 1.0)
     segments = [(sd1_clip.unescape_important(s), w) for s, w in segments]
@@ -19,12 +33,18 @@ def weighted_tokens(tokenizer, text):
     if "<|" in clean:
         raise ValueError("Use plain prompt text, without chat or image special tokens.")
 
-    prefix, suffix = MAGE_T2I_TEMPLATE.split("{}")
-    segments = [(prefix, 1.0), *segments, (suffix, 1.0)]
-    encoded = "".join(s for s, _ in segments).encode("utf-8")
     byte_weights = [w for s, w in segments for _ in s.encode("utf-8")]
-    qwen = tokenizer.qwen3vl_4b.tokenizer
-    ids = qwen(MAGE_T2I_TEMPLATE.format(clean))["input_ids"]
+    if strip_prompt:
+        # MOSS trims the user turn before adding its chat template. Trim the
+        # associated byte weights too, including weighted Unicode whitespace.
+        start = len(clean[:len(clean) - len(clean.lstrip())].encode("utf-8"))
+        clean = clean.strip()
+        byte_weights = byte_weights[start:start + len(clean.encode("utf-8"))]
+    prefix, suffix = template.split("{}")
+    encoded = template.format(clean).encode("utf-8")
+    byte_weights = [1.0] * len(prefix.encode("utf-8")) + byte_weights + [1.0] * len(suffix.encode("utf-8"))
+    qwen = getattr(tokenizer, key).tokenizer
+    ids = qwen(template.format(clean))["input_ids"]
     special_ids = set(qwen.all_special_ids)
     # Qwen's byte-level BPE alphabet (also works with Transformers' fast tokenizer).
     visible = list(range(33, 127)) + list(range(161, 173)) + list(range(174, 256))
@@ -45,7 +65,7 @@ def weighted_tokens(tokenizer, text):
         offset = end
     if offset != len(encoded):
         raise ValueError("Qwen tokenization did not cover the entire prompt.")
-    return {"qwen3vl_4b": [pairs]}
+    return {key: [pairs]}
 
 
 class MageFlowWeightedTextEncode:
@@ -59,7 +79,7 @@ class MageFlowWeightedTextEncode:
     RETURN_TYPES = ("CONDITIONING",)
     FUNCTION = "encode"
     CATEGORY = "conditioning/mage-flow"
-    DESCRIPTION = "Experimental Mage-Flow prompt weighting: (night sky:1.5). Text-to-image only."
+    DESCRIPTION = "Experimental Mage-Flow / MOSS-Image prompt weighting: (night sky:1.5). Connect CLIP type mage or moss_image. Text-to-image only."
 
     def encode(self, clip, text):
         tokens = weighted_tokens(clip.tokenizer, text)

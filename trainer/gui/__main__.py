@@ -1,4 +1,4 @@
-from .app import main
+from .launcher import main
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

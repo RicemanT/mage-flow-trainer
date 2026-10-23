@@ -17,6 +17,7 @@ reporting only rank 0 would hide which rank is the batch-size ceiling.
 from __future__ import annotations
 
 import re
+import time
 from collections import deque
 
 from PySide6 import QtCore, QtWidgets
@@ -33,18 +34,20 @@ from .widgets import (
     set_role,
 )
 
+# Parse fields independently: auxiliary losses and diagnostics can be inserted
+# between them without making the entire step disappear from the graphs.
+NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
 STEP_RE = re.compile(
     r"^e(?P<epoch>\d+)\s+step\s+(?P<step>\d+)/(?P<total>\d+)"
     r"(?:\s+\((?P<pct>\d+)%\))?"
-    r"\s+loss\s+(?P<loss>[\d.eE+-]+)"
-    r"(?:\s+\(mse\s+(?P<mse>[\d.eE+-]+)\s+\+\s+hf\s+(?P<hf>[\d.eE+-]+)\))?"
-    r"(?:\s+ot\s+(?P<ot>[\d.]+))?"
-    # Slash-joined when [component_lr] gives groups different rates, exactly like
-    # `peak A/B GB` does for per-rank memory: "lr 4.00e-05/1.00e-05/8.00e-06".
-    r"\s+lr\s+(?P<lr>[\d.eE+-]+(?:/[\d.eE+-]+)*)"
-    r"\s+(?P<sit>[\d.]+)s/it"
-    r"\s+peak\s+(?P<peak>[\d./]+)GB"
-    r"(?:\s+eta\s+(?P<eta>\S+))?"
+    rf"(?=[^\r\n]*?\bloss\s+(?P<loss>{NUMBER})(?=\s|$))"
+    rf"(?=[^\r\n]*?\blr\s+(?P<lr>{NUMBER}(?:/{NUMBER})*)(?=\s|$))"
+    rf"(?=[^\r\n]*?\s(?P<sit>{NUMBER})s/it(?=\s|$))"
+    rf"(?=[^\r\n]*?\bpeak\s+(?P<peak>{NUMBER}(?:/{NUMBER})*)GB(?=\s|$))"
+    rf"(?:(?=[^\r\n]*?\(mse\s+(?P<mse>{NUMBER})\s+\+\s+hf\s+(?P<hf>{NUMBER})\)))?"
+    rf"(?:(?=[^\r\n]*?\bot\s+(?P<ot>{NUMBER})(?=\s|$)))?"
+    r"(?:(?=[^\r\n]*?\beta\s+(?P<eta>\S+)))?"
+    r"[^\r\n]*$"
 )
 
 # Startup summary lines worth surfacing on the metrics tab rather than leaving in the console.
@@ -61,12 +64,17 @@ class LiveMetricsWidget(QtWidgets.QWidget):
         self.pending = deque()
         self.max_pending_per_tick = 2000
         self.graphs: dict[str, dict] = {}
+        self._started_at = None
+        self._elapsed = None
         self._reset_state()
 
         self.timer = QtCore.QTimer(self)
         self.timer.setSingleShot(True)
         self.timer.timeout.connect(self._flush)
         self._setup_ui()
+        self.elapsed_timer = QtCore.QTimer(self)
+        self.elapsed_timer.setInterval(1000)
+        self.elapsed_timer.timeout.connect(self._set_header)
 
     # ------------------------------------------------------------------ state
 
@@ -82,6 +90,32 @@ class LiveMetricsWidget(QtWidgets.QWidget):
             g["widget"].clear_all_data()
         self._set_header()
         self.report_box.setPlainText("")
+
+    def start_run(self):
+        self._started_at = time.monotonic()
+        self._elapsed = 0.0
+        self.clear_data()
+        self.elapsed_timer.start()
+
+    def finish_run(self):
+        if self._started_at is not None:
+            self._elapsed = time.monotonic() - self._started_at
+            self._started_at = None
+        self.elapsed_timer.stop()
+        self._set_header()
+
+    def elapsed_seconds(self):
+        if self._started_at is not None:
+            return max(0, time.monotonic() - self._started_at)
+        return self._elapsed
+
+    def elapsed_text(self):
+        seconds = self.elapsed_seconds()
+        if seconds is None:
+            return "-"
+        hours, remainder = divmod(int(seconds), 3600)
+        minutes, seconds = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
     # ------------------------------------------------------------------ ui
 
@@ -105,6 +139,10 @@ class LiveMetricsWidget(QtWidgets.QWidget):
         top = QtWidgets.QHBoxLayout()
         self.header = QtWidgets.QLabel("")
         self.header.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        self.header.setWordWrap(True)
+        self.header.setToolTip("Elapsed: wall time for this training process, including loading, text caching, "
+                               "compilation and saves. Separate latent-cache jobs are excluded. "
+                               "A new run or resumed process starts a new clock; Pause/Clear only affect graphs.")
         top.addWidget(self.header, 1)
         self.pause_btn = QtWidgets.QPushButton("Pause")
         self.pause_btn.setCheckable(True)
@@ -160,6 +198,7 @@ class LiveMetricsWidget(QtWidgets.QWidget):
             cell("s/it", f"{L['sit']:.2f}" if "sit" in L else "-"),
             cell("peak", "/".join(f"{p:.1f}" for p in peak) + " GB" if peak else "-"),
             cell("eta", L.get("eta", "-"), SUCCESS),
+            cell("elapsed", self.elapsed_text()),
         ]
         if "hf" in L:
             parts.insert(3, cell("hf", f"{L['hf']:.4f}"))

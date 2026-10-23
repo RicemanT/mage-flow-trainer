@@ -33,6 +33,37 @@ class UpdateRandomnessTests(unittest.TestCase):
     "requires two-rank GPU opt-in",
 )
 class QuantizedDistributedTests(unittest.TestCase):
+    def test_bf16_adapter_optimizer_updates_keep_replicas_identical(self):
+        from trainer.training.config import OptimizerConfig
+        from trainer.training.optim import build_optimizer
+
+        rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(rank)
+        device = torch.device("cuda", rank)
+        dist.init_process_group("nccl")
+        try:
+            for kind in ("adamw8bit", "adafactor"):
+                torch.manual_seed(42)
+                model = torch.nn.Linear(256, 256, bias=False).to(device, torch.bfloat16)
+                ddp = torch.nn.parallel.DistributedDataParallel(model, device_ids=[rank])
+                optimizer = build_optimizer(
+                    [{"params": list(model.parameters()), "lr": 2e-4}],
+                    OptimizerConfig(kind=kind, quantize_state=False, use_kahan=False),
+                )
+                initial = model.weight.detach().clone()
+                torch.manual_seed(100 + rank)
+                for step in range(3):
+                    ddp(torch.randn(8, 256, device=device, dtype=torch.bfloat16)).float().square().mean().backward()
+                    with quantized_optimizer_rng(device, 42, step):
+                        optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
+                    reference = model.weight.detach().clone()
+                    dist.broadcast(reference, src=0)
+                    self.assertTrue(torch.equal(reference, model.weight), kind)
+                self.assertFalse(torch.equal(initial, model.weight), kind)
+        finally:
+            dist.destroy_process_group()
+
     def test_compiled_quantized_training_keeps_replicas_identical(self):
         from trainer.training.quant import QuantConfig, quantize_module
         from trainer.training.config import OptimizerConfig

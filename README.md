@@ -99,6 +99,28 @@ modulation and Qwen3.5-9B final-layer conditioning. Its packaged FLUX.2 VAE has
 an /8 encoder and a smaller decoder; latent packing gives an effective /16 stride.
 Use fresh latent caches with that VAE.
 
+Under **Training → Checkpoints**, **MOSS Q/K/V saving format** defaults to fused
+for full finetunes and plain LoRA/LoCon; separated remains selectable. Other models
+and LoKr/DoRA keep their native layout. Fused LoRA/LoCon exports support loaders that expect
+fused QKV, including the audited Forge loader. Convert an existing adapter with
+`python lora_qkv_convert.py model.safetensors --format fused`, or launch
+`python lora_qkv_convert.py` for a small GUI. It saves a new copy with the same
+effective updates; fused adapters can be larger. See the
+[export guide](docs/moss-image-experimental.md#qkv-saving-format-and-existing-loras).
+
+For an experimental **MOSS LoCon ConvRot** comparison, install the optional kernels
+in the trainer environment (`uv sync --extra gui --extra convrot`, or
+`uv pip install --python .venv/bin/python comfy-kitchen==0.2.37`). Select
+**Transformer quantization backend → ConvRot INT8 (experimental)** in the GUI,
+with frozen mode, BF16 training/adapters, and LyCORIS LoCon bypass enabled.
+Start from native BF16 MOSS weights: the trainer applies per-channel INT8
+quantization with a 256-wide rotation, INT8 forward matmul and BF16 attention.
+The adapter remains in the original weight basis and exports normally.
+Text-encoder quantization and the optimizer remain independent SDNQ options.
+SDNQ transformer storage dtype, matmul, group size and rounding controls do not
+configure ConvRot. Full finetuning and other adapter algorithms are currently
+rejected. This is an experimental speed/quality tradeoff, not lossless training.
+
 Start with the [finetuning preset](configs/moss-image-finetune-experimental.toml)
 or [LoCon preset](configs/moss-image-locon-experimental.toml), both defaulting to
 1024px. Replace dataset and model paths. The [MOSS guide](docs/moss-image-experimental.md) documents the
@@ -131,11 +153,80 @@ The GUI uses the same TOML configuration and training backend as the CLI. Launch
 .venv/bin/python -m trainer.gui
 ```
 
+At startup the GUI checks the current Git branch's configured upstream for updates,
+including when running from a fork. If behind, it offers a fast-forward-only pull;
+choosing No starts the current version. Local tracked edits or divergent commits
+require a manual update. Missing Git, no upstream, or an unavailable network skips
+the Git check and allows startup to continue. Accepting an update also refreshes the
+active venv when `requirements.txt`, `pyproject.toml`, or `uv.lock` differs from its
+last successful dependency installation. This includes pinned Git revisions such
+as LyCORIS. With `uv`, the updater uses the lockfile and keeps additional packages;
+otherwise it installs the pinned requirements with the venv's own Python/pip.
+An independent launcher waits for the startup GUI process to exit completely
+before installing packages (releasing Qt DLLs on Windows), then reopens it on
+success. Installation output stays in the launcher's console.
+Failures stop startup, retain a retryable state, and write
+`.mageflow-trainer-update.log` inside the venv.
+
+Manual pulls and existing venvs without a recorded dependency installation prompt
+once for a package refresh too. Choose No to continue with existing packages.
+The normal installers record their successful environment setup. This checks file
+contents, not timestamps; it does not reinstall packages on every launch or modify
+global Python. `--no-update-check` skips Git checking; `--no-dependency-check`
+skips the package check. Both flags work through the launch scripts.
+
+The config picker lists TOMLs by last modification time, newest first. **Autosave**
+beside the run name defaults to on and saves the form when you press Start; editing
+alone does not save. Turning it off uses a temporary launch TOML without changing
+saved configs. Save and Save As remain available, and the trainer still records its
+run configuration with the training output. Queued runs use their selected TOMLs.
+
+Section headers collapse and expand without changing settings; each settings tab
+also has Expand all / Collapse all. These choices and the autosave toggle are
+remembered in the per-user `mage-flow-trainer/gui.json` preference file (under the
+OS configuration folder, normally `~/.config` on Linux or `%LOCALAPPDATA%` on Windows).
+**Preferences** lets you choose a TOML save folder. Alternatively, set it once at
+launch with `python -m trainer.gui --config-dir "path/to/my configs"`. The picker
+then lists that folder; existing TOMLs are not moved. A missing preference file or
+an unset folder uses the repository's `configs/` directory as before.
+
+### Queue several training configs
+
+Open **Run Queue**, choose **Add TOMLs**, then drag rows or use **Move up/down** to
+set their order. **Remove selected** removes the selected entries. **Start queue**
+validates all configs, then caches and trains each sequentially using the selected
+GPUs. The saved TOMLs are used directly; unsaved editor changes are not included,
+and relative paths resolve from the trainer directory. Give each run a distinct
+output directory/run name. Config files are not rewritten.
+
+Row statuses show caching, training, completion, failure, or skipped runs. An error
+stops the remaining queue; **Stop** stops the current process and cancels later
+runs. Editing a queued file after validation stops that queue before its next
+step; restart the queue to use the edited file. The queue is kept for the current
+GUI session, not restored after an application restart.
+
+**Live Metrics** shows elapsed training time in `HH:MM:SS`, updating even while
+graphs are paused or cleared and preserving the final duration after exit. It is
+wall time for the current training process, including model loading, text caching,
+compilation and saves. Separate latent-cache jobs are excluded. Each queued or
+resumed training process starts a new clock; prior sessions are not accumulated.
+
+For a single run:
+
 1. Load a preset and choose a run name. Under **Model / Output**, select a Diffusers directory or separate transformer, text encoder, and VAE files.
 2. Set your dataset folder and resolution, then use **Cache latents** to prepare images for training from cached latents.
 3. In **Method**, choose PEFT LoRA, LyCORIS LoCon/LoKr/DoRA, or full finetuning. Configure SDNQ for that mode. Full finetuning exposes **Train AdaLN**; adapters always leave AdaLN frozen.
 4. Enable **Cache text embeddings** and set **Caption variations per image** above zero for augmented caching. Choose caption augmentation settings before starting; the trainer prepares missing embeddings automatically.
 5. Select the GPU(s), check batch size and training duration, and click **Start Training**. Multi-GPU training is available on Linux; Windows uses one selected GPU. The GUI displays progress and logs, and **Save / Save As** writes a TOML config you can also run from the CLI.
+
+Adding dataset subset rows disables the single dataset folder and its repeat count;
+remove all rows to restore them. Subsets replace the single-folder source.
+
+**Enable advanced experimental features** reveals an Experimental tab for Self-Flow,
+dual-timestep noising, RTI (Region Token Interface), decoded perceptual/eye LPIPS
+supervision, and eye adversarial loss. Revealing the tab does not activate a loss.
+Configs with an active experiment reveal it automatically; disable those features
+before hiding the tab. This visibility toggle does not change saved training settings.
 
 ### Compiled Loaded Text Encoder
 
@@ -200,6 +291,40 @@ CUDA_VISIBLE_DEVICES=0 .venv/bin/python -m trainer.training.train configs/my-run
 ```
 
 This preset is derived from `bisque-mageflow-lora-SDQN-AdamW.toml`, with batch size 1, accumulation 1, and a 10-step limit. For a real run, increase/remove `max_steps` and enable checkpoint/final saves. The original local preset uses larger batches and is not the configuration measured below.
+
+## Timestep sampling preview
+
+**Method → Flow Matching** includes a live probability plot. Adjust the sampler,
+sigmoid scale, or shift to see the distribution, median, and fraction of draws at
+`t >= 0.9`. Hover a bar for its probability. `t=0` is clean and `t=1` is pure noise;
+this plot shows sampling frequency, not loss weighting. Resolution-aware shift
+has a preview-only latent grid selector. Curriculum range mapping is not shown.
+
+Choose `moss` for the **Kohaku static MOSS recipe**, independently implemented
+from its probability law. The GUI sets and locks `sigmoid_scale=1`, `shift=1`,
+and `flux_shift=false`. TOML loading rejects conflicting explicit values.
+Existing configurations retain their sampler; this is an opt-in experiment.
+
+```toml
+[flow]
+timestep_sample_method = "moss"
+shift = 1.0
+sigmoid_scale = 1.0
+flux_shift = false
+moss_mu = -1.09
+moss_std = 0.95
+moss_cutoff = 0.95
+moss_uniform_mix = 0.01
+moss_p_full = 0.0
+moss_steps = 1000
+```
+
+The MOSS fields above are defaults. `moss_std` controls this sampler's width.
+Its cutoff truncates the underlying inverted logit-normal variable **before
+rescaling onto the full grid**, so returned timesteps still reach `1.0`.
+The uniform mixture adds coverage across the grid; `moss_p_full` optionally adds
+extra mass at pure noise. The final grid bin already has nonzero probability
+when `moss_p_full=0`. This implements the static recipe, not a staged schedule.
 
 ## Dual-timestep noising (experimental)
 

@@ -102,7 +102,7 @@ def optimizer_snapshot(optimizer):
 
 def training_metadata(cfg, step, dtype, runtime=None):
     versions = {"torch": str(torch.__version__)}
-    for package in ("sdnq", "torch-optimi", "lycoris-lora", "peft", "accelerate"):
+    for package in ("sdnq", "torch-optimi", "lycoris-lora", "peft", "accelerate", "comfy-kitchen"):
         try:
             versions[package] = version(package)
         except PackageNotFoundError:

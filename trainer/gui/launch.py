@@ -42,6 +42,9 @@ class Job:
     launch: Launch
     training: bool = False
     on_failure: str = "stop"      # "stop" cancels the remaining queue; "continue" does not
+    config_path: Path | None = None
+    config_digest: str | None = None
+    queue_index: int | None = None
 
 
 def _python() -> str:
@@ -88,13 +91,15 @@ def cache_launch(
     vae_path: str | None = None,
     flux2_vae: bool = False,
     model_family: str = "auto",
+    cache_validation: str = "warn",
 ) -> Launch:
     argv = [_python(), "-u", "-m", "trainer.tools.cache_latents", "cache", dataset_path,
             "--model-path", model_path,
             "--resolution", *[str(r) for r in resolutions],
             "--min-bucket-reso", str(min_bucket_reso),
             "--max-bucket-reso", str(max_bucket_reso),
-            "--bucket-reso-steps", str(bucket_reso_steps)]
+            "--bucket-reso-steps", str(bucket_reso_steps),
+            "--cache-validation", cache_validation]
     if vae_path:
         argv.extend(["--vae-path", vae_path])
     if model_family != "auto":
