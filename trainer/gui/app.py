@@ -17,6 +17,8 @@ nothing in the current combination. That is one step ahead of the validators: a 
 from __future__ import annotations
 
 import sys
+import hashlib
+from dataclasses import asdict, replace
 from pathlib import Path
 
 from PySide6 import QtCore, QtWidgets
@@ -25,6 +27,7 @@ from . import bridge
 from ..training.optimizer_specs import OPTIMIZERS, optimizer_defaults, supports
 from .metrics import LiveMetricsWidget
 from .timestep_plot import TimestepDistributionWidget
+from .run_queue import RunQueueWidget
 from .process import (Job, ProcessRunner, audit_launch, cache_launch, concat_launch,
                       train_launch, training_env)
 from .schema import LAYOUT, SPEC
@@ -204,6 +207,10 @@ class TrainingGUI(QtWidgets.QWidget):
         self._retired = None
         # Launches still to run after the current one -- one per dataset folder (see `_run_each`).
         self._queue: list[Job] = []
+        self._batch_queue_active = False
+        self._queue_cancelled = False
+        self._active_queue_index = None
+        self._queue_generation = 0
         self._on_failure = "stop"
         self._applying = False
         self._current_path: Path | None = None
@@ -277,6 +284,11 @@ class TrainingGUI(QtWidgets.QWidget):
         self.tab_bar.setTabVisible(self.experimental_tab, False)
         self.experimental_chk.toggled.connect(self._show_experimental)
 
+        self.run_queue = RunQueueWidget()
+        self.run_queue.startRequested.connect(self._start_queue)
+        self.queue_tab = self.tab_bar.addTab("Run Queue")
+        self.stack.addWidget(self.run_queue)
+
         self.metrics = LiveMetricsWidget()
         self.tab_bar.addTab("Live Metrics")
         self.stack.addWidget(self.metrics)
@@ -292,6 +304,7 @@ class TrainingGUI(QtWidgets.QWidget):
         self.tab_bar.currentChanged.connect(self.stack.setCurrentIndex)
         main.addWidget(frame, 1)
         main.addWidget(self._build_footer(), 0)
+        self.tab_bar.currentChanged.connect(self._refresh)
 
     def _show_experimental(self, enabled):
         if not enabled and self.tab_bar.currentIndex() == self.experimental_tab:
@@ -766,7 +779,10 @@ class TrainingGUI(QtWidgets.QWidget):
                 widget.setEnabled(on)
 
         ok, err = bridge.validate(flat)
-        running = self.runner is not None and self.runner.isRunning()
+        running = self.runner is not None or bool(self._queue) or self._batch_queue_active
+        self.run_queue.set_busy(running)
+        for box in self.gpu_boxes.values():
+            box.setEnabled(not running)
 
         # Advisories are evaluated against the GPU SELECTION, not just the config -- the two worst
         # ones cannot be seen from the file alone. An "error" advisory blocks Start, because the
@@ -775,6 +791,10 @@ class TrainingGUI(QtWidgets.QWidget):
         notes = bridge.advisories(flat, self.num_processes())
         blocking = [m for lvl, m in notes if lvl == "error"]
         self.start_btn.setEnabled(ok and not running and not blocking)
+        # The queue has its own Start button; do not offer the unrelated editor's
+        # single-run action while viewing queued TOMLs.
+        self.start_btn.setVisible(not running and self.tab_bar.currentIndex() != self.queue_tab)
+        self.stop_btn.setVisible(running)
         # Pressing Start means something different with the box ticked, so it should not still say
         # "Start Training" -- two trainings and a merge is not what that label promises.
         self.start_btn.setText(
@@ -810,6 +830,7 @@ class TrainingGUI(QtWidgets.QWidget):
             self.log("A process is already running.")
             return
         self._on_failure = on_failure
+        self._running_training = training
         try:
             env = training_env(self.gpu_arg())
         except ValueError as exc:            # unreachable from the checkboxes; a guard, not a path
@@ -824,14 +845,71 @@ class TrainingGUI(QtWidgets.QWidget):
         self.log("\n" + "=" * 60 + f"\n{launch.label}\n" + " ".join(launch.argv) + "\n" + "=" * 60)
         self.tab_bar.setCurrentIndex(self.tab_bar.count() - (2 if training else 1))
         if training:
-            self.metrics.clear_data()
+            self.metrics.start_run()
             prevent_sleep(True)
         self.start_btn.setVisible(False)
         self.stop_btn.setVisible(True)
         self._refresh()
         self.runner.start()
 
+    def _start_queue(self):
+        from ..training.config import load_config
+
+        if self.runner is not None or self._queue or self._batch_queue_active:
+            return
+        jobs = []
+        destinations = set()
+        try:
+            for index, path in enumerate(self.run_queue.paths()):
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                cfg = load_config(path)
+                flat = bridge.flatten(asdict(cfg))
+                errors = [text for level, text in bridge.advisories(flat, self.num_processes()) if level == "error"]
+                if errors:
+                    raise ValueError("; ".join(errors))
+                destination = ((PROJECT_ROOT / cfg.train.output_dir).resolve(), cfg.train.run_name)
+                if destination in destinations:
+                    raise ValueError(f"Duplicate output directory/run_name: {destination}. Give each queued run a distinct name.")
+                destinations.add(destination)
+                steps = self._cache_jobs(flat) + [Job(train_launch(path, self.num_processes()), training=True)]
+                jobs.extend(replace(job, config_path=path, config_digest=digest, queue_index=index) for job in steps)
+        except Exception as exc:
+            message = f"Queue validation failed for {path}: {exc}"
+            self.log(message)
+            self.run_queue.status.setText(message)
+            return
+        if not jobs:
+            return
+        self._batch_queue_active = True
+        self._queue_cancelled = False
+        self.run_queue.reset_status()
+        self._queue = jobs[1:]
+        self.log(f"Starting queue: {len(self.run_queue.paths())} TOMLs, {len(jobs)} cache/train steps.")
+        self._run_job(jobs[0])
+
+    def _run_job(self, job):
+        self._active_queue_index = job.queue_index
+        if job.config_path is not None:
+            try:
+                if hashlib.sha256(job.config_path.read_bytes()).hexdigest() != job.config_digest:
+                    raise ValueError(f"Queued TOML changed after validation: {job.config_path}. Restart the queue to use the edited file.")
+            except (OSError, ValueError) as exc:
+                self.log(str(exc))
+                self._queue = []
+                self._batch_queue_active = False
+                self.run_queue.mark(job.queue_index, "Failed")
+                self.run_queue.end(str(exc))
+                self._active_queue_index = None
+                self.start_btn.setVisible(True)
+                self.stop_btn.setVisible(False)
+                self._refresh()
+                return
+            self.run_queue.mark(job.queue_index, "Training" if job.training else "Caching")
+        self._run(job.launch, job.training, job.on_failure)
+
     def _finished(self, code):
+        if getattr(self, "_running_training", False):
+            self.metrics.finish_run()
         prevent_sleep(False)
         self.start_btn.setVisible(True)
         self.stop_btn.setVisible(False)
@@ -843,8 +921,6 @@ class TrainingGUI(QtWidgets.QWidget):
         # emit has returned.
         self._retired, self.runner = self.runner, None
         QtCore.QTimer.singleShot(0, lambda: setattr(self, "_retired", None))
-        self._refresh()
-
         if code != 0 and self._on_failure == "stop" and self._queue:
             # Every later step depends on this one having produced its output, so carrying on would
             # not salvage anything -- it would produce a plausible-looking artifact built on a
@@ -852,13 +928,26 @@ class TrainingGUI(QtWidgets.QWidget):
             self.log(f"Chain stopped: {len(self._queue)} remaining step(s) skipped.")
             self._queue = []
 
+        if self._batch_queue_active:
+            status = "Stopped" if self._queue_cancelled else ("Failed" if code else "Completed")
+            if code or self._queue_cancelled or self._running_training:
+                self.run_queue.mark(self._active_queue_index, status)
+            if not self._queue:
+                self._batch_queue_active = False
+                self.run_queue.end("Queue completed." if status == "Completed" else f"Queue {status.lower()}.")
+                self._active_queue_index = None
+        self.start_btn.setVisible(not bool(self._queue))
+        self.stop_btn.setVisible(bool(self._queue))
+        self._refresh()
+
         if self._queue:
             # `_run` refuses to start while a runner is live, so this waits for the next event-loop
             # turn -- `self.runner` is already None above, but the QThread it referred to is still
             # finishing.
             nxt = self._queue.pop(0)
+            generation = self._queue_generation
             QtCore.QTimer.singleShot(
-                0, lambda: self._run(nxt.launch, nxt.training, nxt.on_failure))
+                0, lambda: self._run_job(nxt) if generation == self._queue_generation else None)
 
     def _start(self):
         if self.pipeline_chk.isChecked():
@@ -1004,12 +1093,24 @@ class TrainingGUI(QtWidgets.QWidget):
         self._run(first.launch, first.training, first.on_failure)
 
     def _stop(self):
+        self._queue_generation += 1
+        self._queue_cancelled = True
         # Drop the rest of the queue first: Stop means stop, not "skip to the next folder".
         if self._queue:
             self.log(f"Stopped -- {len(self._queue)} queued step(s) skipped.")
             self._queue = []
         if self.runner is not None and self.runner.isRunning():
             self.runner.stop()
+        elif self._batch_queue_active:
+            self._batch_queue_active = False
+            if (self._active_queue_index is not None and
+                    self.run_queue.list.item(self._active_queue_index).text().startswith(("Caching —", "Training —"))):
+                self.run_queue.mark(self._active_queue_index, "Stopped")
+            self.run_queue.end("Queue stopped.")
+            self._active_queue_index = None
+            self.start_btn.setVisible(True)
+            self.stop_btn.setVisible(False)
+            self._refresh()
 
     def _dataset_paths(self, flat: dict) -> list[str]:
         """Every directory this config actually reads images from, in config order.
@@ -1079,7 +1180,7 @@ class TrainingGUI(QtWidgets.QWidget):
             if answer != QtWidgets.QMessageBox.StandardButton.Yes:
                 event.ignore()
                 return
-            self.runner.stop()
+        self._stop()
         prevent_sleep(False)
         event.accept()
 

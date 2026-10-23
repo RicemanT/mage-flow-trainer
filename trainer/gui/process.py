@@ -48,6 +48,9 @@ class Job:
     launch: Launch
     training: bool = False
     on_failure: str = "stop"      # "stop" cancels the remaining queue; "continue" does not
+    config_path: Path | None = None
+    config_digest: str | None = None
+    queue_index: int | None = None
 
 
 def _python() -> str:

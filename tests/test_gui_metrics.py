@@ -64,3 +64,33 @@ def test_legacy_and_unknown_auxiliary_fields():
     assert match['peak'] == '8.1/8.2'
     assert STEP_RE.match('saved output/run/epoch001 (280 tensors)') is None
     assert STEP_RE.match('e0 step 1/20 (5%) loss nan lr 1e-4 1.0s/it peak 8.0GB') is None
+
+
+def test_elapsed_clock_survives_pause_clear_and_stops_on_finish(monkeypatch):
+    from trainer.gui import metrics
+    clock = [100.0]
+    monkeypatch.setattr(metrics.time, 'monotonic', lambda: clock[0])
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    widget = LiveMetricsWidget()
+    try:
+        assert widget.elapsed_text() == '-'
+        widget.start_run()
+        clock[0] += 3661
+        widget.pause_btn.setChecked(True)
+        widget._set_header()
+        assert '01:01:01' in widget.header.text()
+        widget.clear_data()
+        assert widget.elapsed_text() == '01:01:01'
+        clock[0] += 2
+        widget.finish_run()
+        clock[0] += 1000
+        assert widget.elapsed_text() == '01:01:03'
+        assert not widget.elapsed_timer.isActive()
+        widget.start_run()
+        assert widget.elapsed_text() == '00:00:00'
+        clock[0] += 100 * 3600
+        assert widget.elapsed_text() == '100:00:00'
+    finally:
+        widget.finish_run()
+        widget.deleteLater()
+        app.processEvents()

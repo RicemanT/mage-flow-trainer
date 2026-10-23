@@ -130,6 +130,8 @@ echo.
 echo ==^> checking the install
 "%VPY%" "%~dp0trainer\tools\check_install.py" --require-gui
 if errorlevel 1 exit /b 1
+"%VPY%" -m trainer.tools.update_dependencies --record
+if errorlevel 1 exit /b 1
 
 echo.
 echo ==^> done.  Start the GUI with:  start-gui.bat

@@ -139,10 +139,45 @@ The GUI uses the same TOML configuration and training backend as the CLI. Launch
 At startup the GUI checks the current Git branch's configured upstream for updates,
 including when running from a fork. If behind, it offers a fast-forward-only pull;
 choosing No starts the current version. Local tracked edits or divergent commits
-require a manual update. Missing Git, no upstream, or an unavailable network do not
-prevent startup. Updates do not install Python dependencies. To skip the check,
-launch with `python -m trainer.gui --no-update-check` (the launch scripts also
-accept `--no-update-check`).
+require a manual update. Missing Git, no upstream, or an unavailable network skips
+the Git check and allows startup to continue. Accepting an update also refreshes the
+active venv when `requirements.txt`, `pyproject.toml`, or `uv.lock` differs from its
+last successful dependency installation. This includes pinned Git revisions such
+as LyCORIS. With `uv`, the updater uses the lockfile and keeps additional packages;
+otherwise it installs the pinned requirements with the venv's own Python/pip.
+Installation runs after closing the startup GUI, then reopens it on success.
+Failures stop startup, retain a retryable state, and write
+`.mageflow-trainer-update.log` inside the venv.
+
+Manual pulls and existing venvs without a recorded dependency installation prompt
+once for a package refresh too. Choose No to continue with existing packages.
+The normal installers record their successful environment setup. This checks file
+contents, not timestamps; it does not reinstall packages on every launch or modify
+global Python. `--no-update-check` skips Git checking; `--no-dependency-check`
+skips the package check. Both flags work through the launch scripts.
+
+### Queue several training configs
+
+Open **Run Queue**, choose **Add TOMLs**, then drag rows or use **Move up/down** to
+set their order. **Remove selected** removes the selected entries. **Start queue**
+validates all configs, then caches and trains each sequentially using the selected
+GPUs. The saved TOMLs are used directly; unsaved editor changes are not included,
+and relative paths resolve from the trainer directory. Give each run a distinct
+output directory/run name. Config files are not rewritten.
+
+Row statuses show caching, training, completion, failure, or skipped runs. An error
+stops the remaining queue; **Stop** stops the current process and cancels later
+runs. Editing a queued file after validation stops that queue before its next
+step; restart the queue to use the edited file. The queue is kept for the current
+GUI session, not restored after an application restart.
+
+**Live Metrics** shows elapsed training time in `HH:MM:SS`, updating even while
+graphs are paused or cleared and preserving the final duration after exit. It is
+wall time for the current training process, including model loading, text caching,
+compilation and saves. Separate latent-cache jobs are excluded. Each queued or
+resumed training process starts a new clock; prior sessions are not accumulated.
+
+For a single run:
 
 1. Load a preset and choose a run name. Under **Model / Output**, select a Diffusers directory or separate transformer, text encoder, and VAE files.
 2. Set your dataset folder and resolution, then use **Cache latents** to prepare images for training from cached latents.

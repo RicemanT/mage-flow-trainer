@@ -118,7 +118,8 @@ def offer_update(app, root):
         "Trainer update available",
         f"{update.branch} is {update.behind} commit(s) behind {update.upstream}.\n\n"
         "Update with git pull --ff-only before starting?\n"
-        "Choose No to start the current version. Python dependencies are not installed by this update.",
+        "Changed dependency files will also refresh packages in this GUI's venv before restarting.\n"
+        "Choose No to start the current version.",
         QtWidgets.QMessageBox.StandardButton.Yes
         | QtWidgets.QMessageBox.StandardButton.No,
         QtWidgets.QMessageBox.StandardButton.No,
@@ -138,22 +139,58 @@ def offer_update(app, root):
     return True
 
 
+def offer_dependency_update(root):
+    """Catch manual pulls and existing installs without a successful-sync marker."""
+    from PySide6 import QtWidgets
+    from ..tools.update_dependencies import dependencies_current, in_venv
+
+    if not in_venv() or dependencies_current(root):
+        return False
+    answer = QtWidgets.QMessageBox.question(
+        None, "Refresh trainer packages",
+        "Dependency files have changed, or this venv has not recorded a successful package refresh.\n\n"
+        "Install the repository's pinned packages into the active venv before starting? "
+        "This includes the required LyCORIS revision.\n"
+        "Choose No to continue with the existing packages.",
+        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        QtWidgets.QMessageBox.StandardButton.Yes,
+    )
+    return answer == QtWidgets.QMessageBox.StandardButton.Yes
+
+
+def restart(root, gui_args, *, refresh_dependencies):
+    import sys
+
+    if refresh_dependencies:
+        # Replace this process before installing: on Windows loaded Qt DLLs cannot
+        # be replaced. The worker imports only the standard library and restarts Qt
+        # only after successful installation. Failed syncs retain the old marker.
+        argv = [sys.executable, str(root / "trainer/tools/update_dependencies.py"),
+                "--root", str(root), "--restart-gui", "--", *gui_args]
+    else:
+        argv = [sys.executable, "-m", "trainer.gui", "--no-update-check", *gui_args]
+    os.execv(sys.executable, argv)
+
+
 def main():
     import sys
 
     from PySide6 import QtWidgets
 
     skip = "--no-update-check" in sys.argv
-    sys.argv[:] = [arg for arg in sys.argv if arg != "--no-update-check"]
+    skip_dependencies = "--no-dependency-check" in sys.argv
+    sys.argv[:] = [arg for arg in sys.argv if arg not in ("--no-update-check", "--no-dependency-check")]
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
     app.setApplicationName("Mage-Flow Trainer")
     root = Path(__file__).resolve().parents[2]
-    if not skip and offer_update(app, root):
-        # Reload all Python modules from the updated checkout, including this entry point.
-        os.execv(
-            sys.executable,
-            [sys.executable, "-m", "trainer.gui", "--no-update-check", *sys.argv[1:]],
-        )
+    updated = not skip and offer_update(app, root)
+    from ..tools.update_dependencies import in_venv
+    if updated:
+        extra = (["--no-dependency-check"] if skip_dependencies else []) + sys.argv[1:]
+        restart(root, extra,
+                refresh_dependencies=not skip_dependencies and in_venv())
+    if not skip_dependencies and offer_dependency_update(root):
+        restart(root, sys.argv[1:], refresh_dependencies=True)
     from .app import main as launch
 
     launch()

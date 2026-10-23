@@ -159,6 +159,7 @@ write_launcher start-gui.sh       trainer.gui                 "Start the Mage-Fl
 echo
 say "checking the install"
 "$VPY" trainer/tools/check_install.py --require-gui
+"$VPY" -m trainer.tools.update_dependencies --record
 
 echo
 say "done.  Start the GUI with:  ./start-gui.sh"

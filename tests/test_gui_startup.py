@@ -141,3 +141,43 @@ def test_untracked_collision_is_not_overwritten(repos):
         startup.apply_update(local, update)
     assert (local / "personal.toml").read_text() == "mine"
     assert run(local, "rev-parse", "HEAD") == update.head
+
+
+@pytest.mark.parametrize("current,yes,expected", [(True, True, False), (False, True, True), (False, False, False)])
+def test_dependency_prompt_for_manual_pulls(monkeypatch, current, yes, expected):
+    from PySide6 import QtWidgets
+    from trainer.tools import update_dependencies as deps
+    monkeypatch.setattr(deps, "in_venv", lambda: True)
+    monkeypatch.setattr(deps, "dependencies_current", lambda root: current)
+    questions = []
+    def answer(*args):
+        questions.append(args)
+        return QtWidgets.QMessageBox.StandardButton.Yes if yes else QtWidgets.QMessageBox.StandardButton.No
+    monkeypatch.setattr(QtWidgets.QMessageBox, "question", answer)
+    assert startup.offer_dependency_update("/repo") == expected
+    assert bool(questions) is not current
+
+
+def test_dependency_install_replaces_gui_process(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(startup.os, "execv", lambda exe, argv: calls.append(argv))
+    startup.restart(tmp_path, [], refresh_dependencies=True)
+    assert calls[0][1] == str(tmp_path / "trainer/tools/update_dependencies.py")
+    assert "--restart-gui" in calls[0]
+
+
+def test_successful_pull_also_updates_packages_without_second_prompt(monkeypatch):
+    from PySide6 import QtWidgets
+    from trainer.tools import update_dependencies as deps
+    import sys
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    monkeypatch.setattr(sys, "argv", ["trainer.gui"])
+    monkeypatch.setattr(startup, "offer_update", lambda *args: True)
+    monkeypatch.setattr(deps, "in_venv", lambda: True)
+    monkeypatch.setattr(startup, "offer_dependency_update", lambda *args: pytest.fail("second prompt"))
+    def restart(root, args, *, refresh_dependencies):
+        assert refresh_dependencies
+        raise SystemExit(0)
+    monkeypatch.setattr(startup, "restart", restart)
+    with pytest.raises(SystemExit):
+        startup.main()
