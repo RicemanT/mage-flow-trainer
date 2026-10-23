@@ -1,6 +1,7 @@
 """Dependency refresh uses the active venv and only records successful installs."""
 import json
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -106,7 +107,7 @@ def test_missing_pip_bootstrapped_in_active_venv(environment, monkeypatch):
 def test_failed_worker_never_launches_gui(environment, monkeypatch):
     root, _ = environment
     monkeypatch.setattr(updater, "refresh", lambda root: (_ for _ in ()).throw(RuntimeError("broken")))
-    monkeypatch.setattr(updater.os, "execv", lambda *args: pytest.fail("GUI started after failed update"))
+    monkeypatch.setattr(updater.subprocess, "run", lambda *args, **kw: pytest.fail("GUI started after failed update"))
     assert updater.main(["--root", str(root), "--restart-gui"]) == 1
 
 
@@ -114,9 +115,12 @@ def test_worker_restarts_gui_only_after_install(environment, monkeypatch):
     root, _ = environment
     calls = []
     monkeypatch.setattr(updater, "_run_installer", lambda *args: calls.append("installed"))
-    monkeypatch.setattr(updater.os, "chdir", lambda path: calls.append(path))
-    monkeypatch.setattr(updater.os, "execv", lambda exe, argv: calls.append(argv))
-    assert updater.main(["--root", str(root), "--restart-gui"]) == 0
+    def run(argv, *, cwd):
+        assert cwd == root
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 7)
+    monkeypatch.setattr(updater.subprocess, "run", run)
+    assert updater.main(["--root", str(root), "--restart-gui"]) == 7
     assert calls[0] == "installed"
     assert updater.dependencies_current(root)
     assert calls[-1][1:] == ["-m", "trainer.gui", "--no-update-check"]

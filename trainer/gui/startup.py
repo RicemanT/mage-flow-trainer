@@ -158,18 +158,13 @@ def offer_dependency_update(root):
     return answer == QtWidgets.QMessageBox.StandardButton.Yes
 
 
-def restart(root, gui_args, *, refresh_dependencies):
-    import sys
+def restart(*, refresh_dependencies):
+    from .launcher import REFRESH_DEPENDENCIES, RESTART_GUI
 
-    if refresh_dependencies:
-        # Replace this process before installing: on Windows loaded Qt DLLs cannot
-        # be replaced. The worker imports only the standard library and restarts Qt
-        # only after successful installation. Failed syncs retain the old marker.
-        argv = [sys.executable, str(root / "trainer/tools/update_dependencies.py"),
-                "--root", str(root), "--restart-gui", "--", *gui_args]
-    else:
-        argv = [sys.executable, "-m", "trainer.gui", "--no-update-check", *gui_args]
-    os.execv(sys.executable, argv)
+    # Let Python/Qt shut down normally. The stdlib-only parent waits for this
+    # process to exit before installing packages or launching another GUI.
+    print("Closing startup GUI for update...", flush=True)
+    raise SystemExit(REFRESH_DEPENDENCIES if refresh_dependencies else RESTART_GUI)
 
 
 def main():
@@ -186,11 +181,9 @@ def main():
     updated = not skip and offer_update(app, root)
     from ..tools.update_dependencies import in_venv
     if updated:
-        extra = (["--no-dependency-check"] if skip_dependencies else []) + sys.argv[1:]
-        restart(root, extra,
-                refresh_dependencies=not skip_dependencies and in_venv())
+        restart(refresh_dependencies=not skip_dependencies and in_venv())
     if not skip_dependencies and offer_dependency_update(root):
-        restart(root, sys.argv[1:], refresh_dependencies=True)
+        restart(refresh_dependencies=True)
     from .app import main as launch
 
     launch()

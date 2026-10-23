@@ -145,7 +145,9 @@ active venv when `requirements.txt`, `pyproject.toml`, or `uv.lock` differs from
 last successful dependency installation. This includes pinned Git revisions such
 as LyCORIS. With `uv`, the updater uses the lockfile and keeps additional packages;
 otherwise it installs the pinned requirements with the venv's own Python/pip.
-Installation runs after closing the startup GUI, then reopens it on success.
+An independent launcher waits for the startup GUI process to exit completely
+before installing packages (releasing Qt DLLs on Windows), then reopens it on
+success. Installation output stays in the launcher's console.
 Failures stop startup, retain a retryable state, and write
 `.mageflow-trainer-update.log` inside the venv.
 

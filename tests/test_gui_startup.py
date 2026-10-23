@@ -158,12 +158,11 @@ def test_dependency_prompt_for_manual_pulls(monkeypatch, current, yes, expected)
     assert bool(questions) is not current
 
 
-def test_dependency_install_replaces_gui_process(monkeypatch, tmp_path):
-    calls = []
-    monkeypatch.setattr(startup.os, "execv", lambda exe, argv: calls.append(argv))
-    startup.restart(tmp_path, [], refresh_dependencies=True)
-    assert calls[0][1] == str(tmp_path / "trainer/tools/update_dependencies.py")
-    assert "--restart-gui" in calls[0]
+@pytest.mark.parametrize("refresh,code", [(True, 75), (False, 76)])
+def test_restart_exits_for_supervisor(refresh, code):
+    with pytest.raises(SystemExit) as exc:
+        startup.restart(refresh_dependencies=refresh)
+    assert exc.value.code == code
 
 
 def test_successful_pull_also_updates_packages_without_second_prompt(monkeypatch):
@@ -175,7 +174,7 @@ def test_successful_pull_also_updates_packages_without_second_prompt(monkeypatch
     monkeypatch.setattr(startup, "offer_update", lambda *args: True)
     monkeypatch.setattr(deps, "in_venv", lambda: True)
     monkeypatch.setattr(startup, "offer_dependency_update", lambda *args: pytest.fail("second prompt"))
-    def restart(root, args, *, refresh_dependencies):
+    def restart(*, refresh_dependencies):
         assert refresh_dependencies
         raise SystemExit(0)
     monkeypatch.setattr(startup, "restart", restart)

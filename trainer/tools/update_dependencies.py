@@ -127,8 +127,10 @@ def main(argv=None):
         return 1
     if args.restart_gui:
         extra = args.gui_args[1:] if args.gui_args[:1] == ["--"] else args.gui_args
-        os.chdir(args.root)
-        os.execv(sys.executable, [sys.executable, "-m", "trainer.gui", "--no-update-check", *extra])
+        return subprocess.run(
+            [sys.executable, "-m", "trainer.gui", "--no-update-check", *extra],
+            cwd=args.root,
+        ).returncode
     return 0
 
 
