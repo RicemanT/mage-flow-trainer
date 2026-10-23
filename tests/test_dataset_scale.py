@@ -77,6 +77,35 @@ class SubsetsFileTests(unittest.TestCase):
                          [self.root / "images/emily", self.root / "images/alice"])
         self.assertEqual(remapped[0].num_repeats, 4)
 
+    def test_mask_path_column_trains_masked_folders(self):
+        """The Studio's `mask_path` column: relative to the manifest (also when `root` re-roots the
+        image folders), blank = unmasked, and the dataset attaches each image's mask by stem."""
+        write_images(self.root / "images/emily", n=2, size=(64, 96))
+        write_images(self.root / "images/alice", n=1)
+        masks = self.root / "masks/emily"
+        masks.mkdir(parents=True)
+        for i in range(2):
+            mask = Image.new("L", (32, 48), 255)
+            mask.paste(0, (0, 24, 32, 48))           # a big banner over the bottom half
+            mask.save(masks / f"img{i}.png")
+        csv = self.root / "folders.csv"
+        csv.write_text("path,num_repeats,images,mask_path\n"
+                       "images/emily,1,2,masks/emily\nimages/alice,1,1,\n", encoding="utf-8")
+        subsets = load_subsets_file(csv)
+        self.assertEqual([s.mask_path for s in subsets], [str(self.root / "masks/emily"), None])
+        remapped = load_subsets_file(csv, self.root / "elsewhere")
+        self.assertEqual(remapped[0].mask_path, str(self.root / "masks/emily"))
+        cfg = DatasetConfig(subsets_file=str(csv), source="encode", resolution=64, min_bucket_reso=64, max_bucket_reso=128,
+                            bucket_reso_steps=16)
+        self.assertTrue(cfg.masked)
+        from trainer.data.dataset import MageFlowDataset
+        dataset = MageFlowDataset(cfg)
+        by_folder = {e.path.parent.name: e for e in dataset.entries}
+        self.assertIsNone(by_folder["alice"].mask)
+        weights = by_folder["emily"].mask
+        self.assertEqual(float(weights[..., -1, :].max()), 0.0)    # the banner carries no loss
+        self.assertEqual(float(weights[..., 0, :].min()), 1.0)     # the rest trains normally
+
     def test_exclusivity_and_duplicates(self):
         csv = self.root / "f.csv"
         csv.write_text(f"path\n{self.root / 'images/emily'}\n")

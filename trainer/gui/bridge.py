@@ -202,6 +202,7 @@ def prune_defaults(flat: dict) -> dict:
     # in effect.
     if out.get("dataset.subsets") or out.get("dataset.subsets_file"):
         out.pop("dataset.path", None)
+        out.pop("dataset.mask_path", None)  # subsets carry their own mask folders
     else:
         out.pop("dataset.subsets", None)
     if not out.get("dataset.subsets_file"):

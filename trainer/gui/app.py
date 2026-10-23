@@ -84,9 +84,17 @@ def detect_gpus() -> list[tuple[int, str]]:
         return [(0, "GPU 0")]
 
 
+def _has_mask_folder(c: dict) -> bool:
+    return bool(c.get("dataset.mask_path")
+                or any(s.get("mask_path") for s in c.get("dataset.subsets") or []))
+
+
 # Controls that exist but would do nothing in the current combination. Each entry is
 # key -> predicate(flat_config) -> enabled.
 _RULES = {
+    "dataset.use_masks": _has_mask_folder,
+    **{f"dataset.{option}": (lambda c: _has_mask_folder(c) and bool(c.get("dataset.use_masks")))
+       for option in ("mask_outside_weight", "mask_dilate_px", "mask_feather_px")},
     **{f'paired_texture.{option}': (lambda c: float(c.get('paired_texture.scale') or 0) > 0) for option in (
         'levels', 'patch', 'tokens', 'features', 'seed', 'snr_cut', 'min_gate')},
     **{f'flow.{option}': (lambda c: float(c.get('flow.hf_scale') or 0) > 0) for option in (
@@ -761,6 +769,7 @@ class TrainingGUI(QtWidgets.QWidget):
             # Even an unfinished subset row switches away from the single-folder
             # source. Do not accidentally launch on the old, now-disabled folder.
             flat["dataset.path"] = None
+            flat["dataset.mask_path"] = None
         return flat
 
     def _managed_target(self, flat: dict) -> Path:
@@ -916,11 +925,6 @@ class TrainingGUI(QtWidgets.QWidget):
     def _refresh(self):
         flat = self.collect()
         self.timestep_plot.set_config(flat)
-        has_subsets = self.editors["dataset.subsets"].table.rowCount() > 0
-        for key in ("dataset.path", "dataset.num_repeats"):
-            self.editors[key].set_enabled(not has_subsets)
-            for widget in self.rows[key]:
-                widget.setEnabled(not has_subsets)
         # Never hide an enabled experiment loaded from a TOML. Visibility is a UI
         # preference; it must not silently mutate or conceal the training config.
         active_experiment = any(flat.get(k) for k in (
@@ -941,6 +945,14 @@ class TrainingGUI(QtWidgets.QWidget):
             editor.set_enabled(on)
             for widget in self.rows.get(key, ()):
                 widget.setEnabled(on)
+        # After the rules, which only see collected values: even an unfinished subset row (no path
+        # yet) switches away from the single-folder source.
+        has_subsets = self.editors["dataset.subsets"].table.rowCount() > 0
+        for key in ("dataset.path", "dataset.num_repeats", "dataset.mask_path"):
+            if has_subsets or key not in _RULES:   # a key with a rule keeps the rule's answer
+                self.editors[key].set_enabled(not has_subsets)
+                for widget in self.rows[key]:
+                    widget.setEnabled(not has_subsets)
         # Some editors report an empty value while disabled (the StageLR grid under another
         # schedule kind), so the config is read again once the rules are applied -- otherwise a
         # kind change would validate the previous state until the next keystroke.
