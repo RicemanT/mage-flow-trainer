@@ -923,8 +923,10 @@ class MageFlowDataset(Dataset):
 
         from .texture import crop_canvas, feather_mask
 
+        from .cache import to_rgb
+
         with _Image.open(e.path) as im:
-            img = im.convert("RGB")
+            img = to_rgb(im, e.path)
         crop, valid = crop_canvas(img, canvas, self.texture_cfg, rng)
         if crop is None:
             # `oversize = "skip"` on an image that cannot hold the canvas. Returning a shape the

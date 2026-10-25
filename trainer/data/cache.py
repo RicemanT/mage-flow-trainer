@@ -54,9 +54,30 @@ def cache_path(image_path: str | Path, bucket: tuple[int, int]) -> Path:
     return p.with_name(f"{p.stem}_{bucket[0]:04d}x{bucket[1]:04d}{CACHE_SUFFIX}")
 
 
+# Solid backgrounds for transparent images (the Studio's "Flatten transparent images" palette), chosen by file name.
+FLATTEN_PALETTE = ((255, 255, 255), (0, 0, 0), (128, 128, 128), (200, 40, 40), (50, 90, 200), (60, 160, 70),
+                   (240, 210, 60), (240, 160, 190), (130, 80, 180), (240, 140, 40), (120, 80, 45), (60, 200, 200))
+
+
+def to_rgb(img: Image.Image, key: str | Path) -> Image.Image:
+    """`img` as RGB. A transparent image is composited onto a solid palette colour (the same one for the same `key`)
+    instead of dropping its alpha, which would expose the colours hidden under the transparent pixels -- noise the model
+    would learn as the background. Datasets from the Studio are flattened (and tagged) before training; this is the
+    safety net for any that are not."""
+    if img.mode == "P" and "transparency" in img.info or img.mode in ("PA", "LA"):
+        img = img.convert("RGBA")
+    if "A" in img.getbands() and img.getchannel("A").getextrema()[0] < 255:
+        colour = FLATTEN_PALETTE[int(hashlib.md5(Path(key).stem.encode("utf-8")).hexdigest()[:8], 16) % len(FLATTEN_PALETTE)]
+        background = Image.new("RGBA", img.size, colour + (255,))
+        background.alpha_composite(img.convert("RGBA"))
+        return background.convert("RGB")
+    return img.convert("RGB")
+
+
 def load_and_crop(image_path: str | Path, bucket_mgr: BucketManager) -> tuple[Image.Image, dict]:
     """Resize to the bucket's aspect then centre-crop. Never pads."""
-    img = Image.open(image_path).convert("RGB")
+    with Image.open(image_path) as raw:
+        img = to_rgb(raw, image_path)
     w, h = img.size
     bucket, resized, ar_error = bucket_mgr.select_bucket(w, h)
 
