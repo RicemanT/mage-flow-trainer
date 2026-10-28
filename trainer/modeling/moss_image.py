@@ -38,37 +38,57 @@ def _rotate(x, rope):
     return x * cos + torch.cat((-b, a), -1) * sin
 
 
-def _attention(q, k, v, rope, heads, packed):
+def _attention(q, k, v, rope, heads, packed, ref=None, keep_kv=False):
+    """Packed attention. `ref` = (keys, values, lengths): each packed sample's reference keys and values
+    (already normalized and rotated, [1, R, heads, head_dim]), appended to that sample's own keys and values.
+    With `keep_kv`, also returns this call's rotated keys and values, the cache a reference pass produces."""
     shape = (*q.shape[:2], heads, q.shape[-1] // heads)
-    q = _rotate(q.reshape(shape), rope).transpose(1, 2)
-    k = _rotate(k.reshape(shape), rope).transpose(1, 2)
-    v = v.reshape(shape).transpose(1, 2)
+    q = _rotate(q.reshape(shape), rope)
+    k = _rotate(k.reshape(shape), rope)
+    v = v.reshape(shape)
+    kept = (k, v) if keep_kv else None
     lengths, cu, longest = packed
+    k_lengths, k_cu, k_longest = lengths, cu, longest
+    if ref is not None:
+        ref_k, ref_v, ref_lengths = ref
+        ks, vs = [], []
+        for a, b, c, d in zip(k.split(lengths, 1), v.split(lengths, 1),
+                              ref_k.split(ref_lengths, 1), ref_v.split(ref_lengths, 1)):
+            ks += [a, c.to(a.dtype)]
+            vs += [b, d.to(b.dtype)]
+        k, v = torch.cat(ks, 1), torch.cat(vs, 1)
+        k_lengths = [a + b for a, b in zip(lengths, ref_lengths)]
+        k_longest = max(k_lengths)
+        if cu is not None:
+            k_cu = F.pad(torch.tensor(k_lengths, device=cu.device, dtype=torch.int32).cumsum(0, dtype=torch.int32), (1, 0))
     if cu is not None:
         from torch.nn.attention.varlen import varlen_attn
 
-        return varlen_attn(
-            q[0].transpose(0, 1).contiguous().to(v.dtype),
-            k[0].transpose(0, 1).contiguous().to(v.dtype),
-            v[0].transpose(0, 1).contiguous(),
+        out = varlen_attn(
+            q[0].contiguous().to(v.dtype),
+            k[0].contiguous().to(v.dtype),
+            v[0].contiguous(),
             cu,
-            cu,
+            k_cu,
             longest,
-            longest,
+            k_longest,
         ).flatten(1)[None]
-    return (
-        torch.cat(
-            [
-                F.scaled_dot_product_attention(a.to(c.dtype), b.to(c.dtype), c)
-                for a, b, c in zip(
-                    q.split(lengths, 2), k.split(lengths, 2), v.split(lengths, 2)
-                )
-            ],
-            2,
+    else:
+        q, k, v = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+        out = (
+            torch.cat(
+                [
+                    F.scaled_dot_product_attention(a.to(c.dtype), b.to(c.dtype), c)
+                    for a, b, c in zip(
+                        q.split(lengths, 2), k.split(k_lengths, 2), v.split(k_lengths, 2)
+                    )
+                ],
+                2,
+            )
+            .transpose(1, 2)
+            .flatten(2)
         )
-        .transpose(1, 2)
-        .flatten(2)
-    )
+    return out if kept is None else (out, kept)
 
 
 class _TextBlock(nn.Module):
@@ -116,23 +136,24 @@ class _Block(nn.Module):
         self.proj["ffn_up_gate"] = nn.Linear(dim, 2 * ffn_dim, bias=False)
         self.proj["ffn_down"] = nn.Linear(ffn_dim, dim, bias=False)
 
-    def forward(self, x, rope, modulation, packed):
+    def forward(self, x, rope, modulation, packed, ref=None, keep_kv=False):
+        """`ref`: the references' (keys, values, lengths) for this block (see `_attention`). `keep_kv`: a
+        reference pass, returning (x, (keys, values))."""
         shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = modulation.unbind(1)
         y = self.norm1(x) * (1 + scale_a) + shift_a
         dtype = x.dtype
         y = y.to(dtype)
         q = self.q_norm(self.proj["q"](y).unflatten(-1, (self.heads, -1))).flatten(2)
         k = self.k_norm(self.proj["k"](y).unflatten(-1, (self.heads, -1))).flatten(2)
-        x = (
-            x
-            + self.proj["o"](
-                _attention(q, k, self.proj["v"](y), rope, self.heads, packed)
-            )
-            * gate_a
-        )
+        attended = _attention(q, k, self.proj["v"](y), rope, self.heads, packed, ref, keep_kv)
+        kv = None
+        if keep_kv:
+            attended, kv = attended
+        x = x + self.proj["o"](attended) * gate_a
         y = self.norm2(x) * (1 + scale_f) + shift_f
         hidden, gate = self.proj["ffn_up_gate"](y.to(dtype)).chunk(2, -1)
-        return x + self.proj["ffn_down"](_situ(hidden, gate)) * gate_f
+        x = x + self.proj["ffn_down"](_situ(hidden, gate)) * gate_f
+        return x if kv is None else (x, kv[0], kv[1])
 
 
 class _RoPE(nn.Module):
@@ -182,8 +203,26 @@ class _RoPE(nn.Module):
         image[:, 3] -= (width - 1) / 2
         text = torch.zeros(text_length, 4, device=device, dtype=torch.float32)
         text[:, 1] = torch.arange(text_length, device=device)
-        phase = torch.cat((image, text), 0).unsqueeze(-1) * self.bands
+        return self.embed(torch.cat((image, text), 0))
+
+    def embed(self, coords):
+        """[N, 4] (r, f, h, w) coordinates -> [1, N, head_dim] sin/cos table."""
+        if self.bands.dtype != torch.float32:
+            self.bands = self._default_bands(coords.device)
+        phase = coords.float().unsqueeze(-1) * self.bands
         return torch.cat((phase.sin(), phase.cos()), -2).flatten(-2).unsqueeze(0)
+
+    def references(self, shapes, device):
+        """Reference i of an example at r = i + 1, f = 0, its rows and columns centered: ComfyUI's layout for
+        MOSS-Image reference latents (and Moss-Image-Edit's), next to an image at f = text length."""
+        coords = []
+        for i, (height, width) in enumerate(shapes):
+            h, w = torch.meshgrid(torch.arange(height, device=device), torch.arange(width, device=device), indexing="ij")
+            ref = torch.stack((torch.full_like(h, i + 1), torch.zeros_like(h), h, w), -1).flatten(0, 1).float()
+            ref[:, 2] -= (height - 1) / 2
+            ref[:, 3] -= (width - 1) / 2
+            coords.append(ref)
+        return self.embed(torch.cat(coords, 0))
 
 
 @dataclass
@@ -280,14 +319,54 @@ class MOSSImage(nn.Module):
             return checkpoint_with_offload(self, fn, block, *args)
         return fn(block, *args)
 
+    def _reference_kv(self, ref_latents, batch, dtype):
+        """Every block's keys and values for each example's references: one pass at timestep 0 in which an
+        example's references attend only to each other. Returns ([keys per block], [values per block], lengths),
+        or None when no example has a reference."""
+        if len(ref_latents) != batch:
+            raise ValueError(f"ref_latents has {len(ref_latents)} entries for {batch} examples")
+        per_example = [list(refs or []) for refs in ref_latents]
+        if not any(per_example):
+            return None
+        for refs in per_example:
+            if any(r.ndim != 5 or r.shape[0] != 1 or r.shape[2] != 1 for r in refs):
+                raise ValueError("MOSS reference latents must be [1,C,1,h,w]")
+        lengths = [sum(r.shape[-2] * r.shape[-1] for r in refs) for refs in per_example]
+        device = next(self.parameters()).device
+        tokens = self.video_embedder(torch.cat(
+            [r.squeeze(2).flatten(2).transpose(1, 2).to(device=device, dtype=dtype) for refs in per_example for r in refs], 1))
+        rope = torch.cat([self.rope.references([r.shape[-2:] for r in refs], device) for refs in per_example if refs], 1).to(dtype)
+        half = self.params.freq_dim // 2
+        freq = 10000 ** (-torch.arange(half, device=device, dtype=torch.float64) / half)
+        phase = torch.zeros(1, device=device, dtype=torch.float64)[:, None] * freq
+        time = self.time_embedding(torch.cat((phase.cos(), phase.sin()), -1).float().to(dtype))
+        modulation = self.shared_block_modulation(time).view(1, 6, 1, -1).expand(1, 6, tokens.shape[1], -1)
+        present = [n for n in lengths if n]
+        cu = None
+        if self.attention_backend == "torch_varlen":
+            cu = F.pad(torch.tensor(present, device=device, dtype=torch.int32).cumsum(0, dtype=torch.int32), (1, 0))
+        packed = (present, cu, max(present))
+        keys, values = [], []
+        x = tokens
+        for block in self.layers:
+            x, k, v = self._run(self.block_forward, block, x, rope, modulation, packed, None, True)
+            keys.append(k)
+            values.append(v)
+        return keys, values, lengths
+
     def forward(
         self,
         hidden_states,
         timestep,
         encoder_hidden_states,
         return_dict=False,
+        ref_latents=None,
         **kwargs,
     ):
+        """`ref_latents`: per example, a list of reference latents [1, C, 1, h, w] (or None / []). They are read
+        the way ComfyUI reads MOSS-Image reference latents in the Moss-Image-Edit layout: clean (timestep 0),
+        attending only to the example's other references, at r = i + 1, f = 0; the image and text attend to them
+        as extra keys and values. Their own outputs are not predicted."""
         if kwargs:
             raise ValueError(f"Unsupported MOSS forward arguments: {list(kwargs)}")
         xs = (
@@ -356,8 +435,10 @@ class MOSSImage(nn.Module):
         )
         rope = torch.cat(ropes, 1)
         jp = packed(lengths)
-        for block in self.layers:
-            x = self._run(self.block_forward, block, x, rope, modulation, jp)
+        refs = self._reference_kv(ref_latents, len(xs), video.dtype) if ref_latents is not None else None
+        for i, block in enumerate(self.layers):
+            ref = None if refs is None else (refs[0][i], refs[1][i], refs[2])
+            x = self._run(self.block_forward, block, x, rope, modulation, jp, ref)
         outputs = []
         for i, (part, ni, shape) in enumerate(zip(x.split(lengths, 1), ilens, shapes)):
             y = self.final_norm_video(part[:, :ni])
